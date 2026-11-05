@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ranked Forge</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --text: #1d1c1a; --muted: #6b6862; --line: #e3e0da;
+    --accent: #b4541f; --accent-text: #ffffff; --ok: #2f7a4a; --warn: #a3471b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151413; --surface: #1f1e1c; --text: #eceae6; --muted: #a29e96; --line: #33312e;
+            --accent: #e0793f; --accent-text: #151413; --ok: #6cc28c; --warn: #f09a6a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 760px) { .grid { grid-template-columns: 1fr 1fr; } }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+  .wide { grid-column: 1 / -1; }
+  button { font: inherit; border: 0; border-radius: 7px; padding: 8px 14px; cursor: pointer;
+           background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input { font: inherit; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .msg { min-height: 1.5em; font-size: 13px; color: var(--warn); }
+  .ok { color: var(--ok); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: var(--bg); padding: 2px 6px; border-radius: 5px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  td.num, th.num { text-align: right; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  ol { padding-left: 20px; margin: 8px 0; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Ranked Forge</h1>
+      <div class="muted small" id="season"></div>
+    </div>
+    <div class="row">
+      <span class="small muted" id="walletLabel"></span>
+      <button id="connectBtn">Connect wallet</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section id="profile" hidden>
+      <h2>Your account</h2>
+      <div id="needName" hidden>
+        <p class="small">Pick a username. It must match your <b>player name in Forge</b> exactly and can't be changed later.</p>
+        <div class="row"><input id="nameInput" maxlength="20" placeholder="3-20 letters, digits, _"><button id="nameBtn">Save</button></div>
+      </div>
+      <div id="hasName" hidden>
+        <div class="stats">
+          <div class="stat"><b id="sRating">–</b><span>Rating</span></div>
+          <div class="stat"><b id="sWins">–</b><span>Wins</span></div>
+          <div class="stat"><b id="sGames">–</b><span>Games</span></div>
+          <div class="stat"><b id="sStreak">–</b><span>Best streak</span></div>
+        </div>
+      </div>
+      <div class="msg" id="profileMsg"></div>
+    </section>
+
+    <section id="play" hidden>
+      <h2>Play ranked</h2>
+      <ol class="small">
+        <li>Set your Forge player name to <code id="playName"></code>.</li>
+        <li>Press <b>Play ranked</b> below. Use the same network you'll play from.</li>
+        <li>In Forge choose <b>Online Multiplayer → Join</b> and enter a server address.</li>
+        <li>Choose a deck and press Ready. The match starts when both players are ready.</li>
+      </ol>
+      <div class="row"><button id="armBtn">Play ranked</button><span class="small muted" id="armState"></span></div>
+      <div class="table-wrap" style="margin-top:12px">
+        <table><thead><tr><th>Server</th><th>Address</th><th>Status</th></tr></thead><tbody id="servers"></tbody></table>
+      </div>
+      <div class="msg" id="playMsg"></div>
+    </section>
+
+    <section id="rewards" class="wide" hidden>
+      <h2>Goals &amp; rewards</h2>
+      <div class="table-wrap">
+        <table><thead><tr><th>Goal</th><th>Progress</th><th class="num">Reward</th><th>Status</th></tr></thead><tbody id="goals"></tbody></table>
+      </div>
+      <p class="small muted" id="claimNote"></p>
+      <div class="msg" id="rewardMsg"></div>
+    </section>
+
+    <section class="wide">
+      <h2>Leaderboard</h2>
+      <div class="table-wrap">
+        <table><thead><tr><th>#</th><th>Player</th><th class="num">Rating</th><th class="num">W</th><th class="num">L</th><th class="num">D</th></tr></thead><tbody id="board"></tbody></table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function b58(bytes) {
+  let n = 0n;
+  for (const b of bytes) n = n * 256n + BigInt(b);
+  let out = "";
+  while (n > 0n) { out = ALPHABET[Number(n % 58n)] + out; n /= 58n; }
+  for (const b of bytes) { if (b === 0) out = "1" + out; else break; }
+  return out;
+}
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let token = null;
+try { token = localStorage.getItem("rf_token"); } catch {}
+let config = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    method: opts.method || "GET",
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401 && token && !path.startsWith("/api/auth")) { setToken(null); render(); }
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+function setToken(t) {
+  token = t;
+  try { t ? localStorage.setItem("rf_token", t) : localStorage.removeItem("rf_token"); } catch {}
+}
+
+function provider() {
+  return window.phantom?.solana || window.solflare || window.solana || null;
+}
+
+$("connectBtn").onclick = async () => {
+  if (token) { setToken(null); return render(); }
+  const p = provider();
+  if (!p) { alert("Install a Solana wallet (Phantom, Solflare) to sign in."); return; }
+  try {
+    const { publicKey } = await p.connect();
+    const wallet = publicKey.toString();
+    const { message } = await api("/api/auth/nonce", { method: "POST", body: { wallet } });
+    const signed = await p.signMessage(new TextEncoder().encode(message), "utf8");
+    const sig = signed.signature || signed;
+    const { token: t } = await api("/api/auth/verify", { method: "POST", body: { wallet, signature: b58(sig) } });
+    setToken(t);
+    render();
+  } catch (e) { alert(e.message || e); }
+};
+
+$("nameBtn").onclick = async () => {
+  $("profileMsg").textContent = "";
+  try { await api("/api/me/username", { method: "POST", body: { username: $("nameInput").value.trim() } }); render(); }
+  catch (e) { $("profileMsg").textContent = e.message; }
+};
+
+$("armBtn").onclick = async () => {
+  $("playMsg").textContent = "";
+  try { await api("/api/play/arm", { method: "POST" }); render(); }
+  catch (e) { $("playMsg").textContent = e.message; }
+};
+
+async function claim(id) {
+  $("rewardMsg").textContent = "";
+  try { await api(`/api/rewards/${id}/claim`, { method: "POST" }); render(); }
+  catch (e) { $("rewardMsg").textContent = e.message; }
+}
+window.claim = claim;
+
+const STATUS = {
+  available: "Ready to claim", pending_approval: "Waiting for approval", approved: "Queued for payout",
+  sending: "Sending", sent: "Paid", needs_review: "Being checked", rejected: "Rejected",
+};
+
+async function render() {
+  config = config || await api("/api/config");
+  $("season").textContent = `Season ${config.season} · rewards in ${config.token}` + (config.payoutMode === "dry-run" ? " · test mode, no real payouts" : "");
+
+  const board = await api("/api/leaderboard");
+  $("board").innerHTML = board.rows.map((r, i) =>
+    `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.rating}</td><td class="num">${r.wins}</td><td class="num">${r.losses}</td><td class="num">${r.draws}</td></tr>`
+  ).join("") || `<tr><td colspan="6" class="muted">No ranked games yet.</td></tr>`;
+
+  const signedIn = !!token;
+  $("connectBtn").textContent = signedIn ? "Sign out" : "Connect wallet";
+  for (const id of ["profile", "play", "rewards"]) $(id).hidden = !signedIn;
+  $("walletLabel").textContent = "";
+  if (!signedIn) return;
+
+  let me;
+  try { me = await api("/api/me"); } catch { return; }
+  $("walletLabel").textContent = me.wallet.slice(0, 4) + "…" + me.wallet.slice(-4);
+  $("needName").hidden = !!me.username;
+  $("hasName").hidden = !me.username;
+  $("play").hidden = !me.username;
+  const s = me.stats || { rating: 1200, wins: 0, games: 0, bestStreak: 0 };
+  $("sRating").textContent = s.rating; $("sWins").textContent = s.wins;
+  $("sGames").textContent = s.games; $("sStreak").textContent = s.bestStreak;
+  $("playName").textContent = me.username || "";
+
+  if (me.arm) {
+    const mins = Math.max(0, Math.round((me.arm.expiresAt * 1000 - Date.now()) / 60000));
+    $("armState").innerHTML = `<span class="ok">Armed for ${mins} min</span> from ${esc(me.arm.ip)}`;
+  } else {
+    $("armState").textContent = "";
+  }
+  const servers = await api("/api/servers");
+  $("servers").innerHTML = servers.map((sv) =>
+    `<tr><td>${esc(sv.id)}</td><td><code>${esc(sv.address)}</code></td><td>${esc(sv.status)}${sv.players.length ? " · " + sv.players.map(esc).join(", ") : ""}</td></tr>`
+  ).join("") || `<tr><td colspan="3" class="muted">No servers online.</td></tr>`;
+
+  const byGoal = Object.fromEntries(me.rewards.filter((r) => r.season === config.season).map((r) => [r.goalId, r]));
+  const metric = { wins: s.wins, games: s.games, rating: s.rating, bestStreak: s.bestStreak };
+  $("goals").innerHTML = config.goals.map((g) => {
+    const r = byGoal[g.id];
+    const v = metric[g.metric] ?? 0;
+    const pct = Math.min(100, Math.round((v / g.target) * 100));
+    const status = r
+      ? (r.status === "available" ? `<button onclick="claim(${r.id})">Claim</button>` : esc(STATUS[r.status] || r.status))
+      : `<span class="muted">${v} / ${g.target}</span>`;
+    return `<tr><td>${esc(g.title)}</td><td style="min-width:120px"><div class="bar"><i style="width:${pct}%"></i></div></td>
+            <td class="num">${esc(g.reward)} ${esc(config.token)}</td><td>${status}</td></tr>`;
+  }).join("");
+  $("claimNote").textContent = config.claimMode === "manual"
+    ? "Claims are reviewed before payout. Tokens are sent to the wallet you signed in with."
+    : "Tokens are sent to the wallet you signed in with.";
+}
+
+render().catch((e) => console.error(e));
+setInterval(() => render().catch(() => {}), 20000);
+</script>
+</body>
+</html>

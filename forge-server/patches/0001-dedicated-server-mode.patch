@@ -1,0 +1,673 @@
+diff --git a/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java b/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java
+new file mode 100644
+index 00000000..91ae3140
+--- /dev/null
++++ b/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java
+@@ -0,0 +1,279 @@
++package forge.server;
++
++import forge.game.GameOutcome;
++import forge.game.Match;
++import forge.gamemodes.match.GameLobby.GameLobbyData;
++import forge.gamemodes.match.HostedMatch;
++import forge.gamemodes.match.LobbySlot;
++import forge.gamemodes.match.LobbySlotType;
++import forge.gamemodes.net.ChatMessage;
++import forge.gamemodes.net.event.MessageEvent;
++import forge.gamemodes.net.server.DedicatedHooks;
++import forge.gamemodes.net.server.FServerManager;
++import forge.gamemodes.net.server.ServerGameLobby;
++import forge.gamemodes.net.client.ClientGameLobby;
++import forge.gui.GuiBase;
++import forge.interfaces.ILobbyListener;
++import forge.interfaces.IUpdateable;
++import forge.localinstance.properties.ForgeConstants;
++import forge.localinstance.properties.ForgeNetPreferences;
++import forge.localinstance.properties.ForgePreferences.FPref;
++import forge.model.FModel;
++
++import java.net.InetSocketAddress;
++import java.net.SocketAddress;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.UUID;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * {@code forge server}: hosts one 1v1 lobby with no local player, gates logins through the
++ * rewards service, starts the match once both remote players are ready, reports the result,
++ * then exits so the process supervisor (systemd/docker) restarts it with a clean lobby.
++ *
++ * <p>Configuration comes from environment variables:
++ * <ul>
++ *   <li>FORGE_SERVER_ID: name shown on the website, e.g. "eu-1" (required)</li>
++ *   <li>FORGE_PUBLIC_ADDRESS: host:port players type into Forge's Join dialog (required)</li>
++ *   <li>FORGE_PORT: port to listen on (default 36743)</li>
++ *   <li>REWARDS_URL: base URL of the rewards service (required)</li>
++ *   <li>GAME_SERVER_SECRET: shared HMAC secret (required)</li>
++ *   <li>FORGE_MAX_MATCH_MINUTES: abandon a match that runs longer (default 90)</li>
++ *   <li>FORGE_RANKED_LOGIN_GATE: set to "off" only for local testing without the rewards service</li>
++ * </ul>
++ */
++public final class DedicatedServer {
++    private static final int HEARTBEAT_SECONDS = 15;
++    private static final int EXIT_GRACE_SECONDS = 120;
++
++    private final String serverId = require("FORGE_SERVER_ID");
++    private final String publicAddress = require("FORGE_PUBLIC_ADDRESS");
++    private final int port = Integer.parseInt(env("FORGE_PORT", "36743"));
++    private final long maxMatchMillis = TimeUnit.MINUTES.toMillis(Long.parseLong(env("FORGE_MAX_MATCH_MINUTES", "90")));
++    private final boolean gateEnabled = !"off".equalsIgnoreCase(env("FORGE_RANKED_LOGIN_GATE", "on"));
++
++    private final ScheduledExecutorService loop = Executors.newSingleThreadScheduledExecutor(r -> {
++        final Thread t = new Thread(r, "dedicated-server");
++        t.setDaemon(false);
++        return t;
++    });
++
++    private RewardsClient rewards;
++    private FServerManager server;
++    private ServerGameLobby lobby;
++
++    private String matchId;
++    private long matchStartedAt;
++    private List<String> seatedPlayers = List.of();
++    private boolean reported;
++    private long lastHeartbeat;
++    private boolean startRefusedNotified;
++
++    public static void run(final String[] args) {
++        new DedicatedServer().start();
++    }
++
++    private void start() {
++        GuiBase.setInterface(new HeadlessServerGui());
++        FModel.initialize(null, prefs -> {
++            prefs.setPref(FPref.UI_MATCHES_PER_GAME, "1");   // one game per match: one result per report
++            prefs.setPref(FPref.ENFORCE_DECK_LEGALITY, true);
++            prefs.setPref(FPref.DEV_MODE_ENABLED, false);
++            FModel.getNetPreferences().setPref(ForgeNetPreferences.FNetPref.UPnP, "NEVER");
++            return null;
++        });
++
++        rewards = new RewardsClient(require("REWARDS_URL"), require("GAME_SERVER_SECRET"),
++                Path.of(ForgeConstants.USER_DIR, "pending-results"));
++        rewards.flushSpool();
++
++        DedicatedHooks.dedicated = true;
++        DedicatedHooks.leavers.clear();
++        if (gateEnabled) {
++            DedicatedHooks.loginGate = this::checkLogin;
++        } else {
++            System.out.println("WARNING: login gate is OFF. Anyone can join under any name. Results are still reported.");
++        }
++
++        server = FServerManager.getInstance();
++        lobby = new ServerGameLobby();
++        server.startServer(port);
++        server.setLobby(lobby);
++        lobby.setListener(new IUpdateable() {
++            @Override public void update(final boolean fullUpdate) { server.updateLobbyState(); }
++            @Override public void update(final int slot, final LobbySlotType type) { }
++        });
++        server.setLobbyListener(new ILobbyListener() {
++            @Override public void message(final String source, final String message, final ChatMessage.MessageType type) {
++                System.out.println("[chat] " + (source == null ? "" : source + ": ") + message);
++            }
++            @Override public void update(final GameLobbyData state, final int slot) { }
++            @Override public void close() { }
++            @Override public ClientGameLobby getLobby() { return null; }
++        });
++
++        System.out.printf("Dedicated server %s listening on %d (players connect to %s)%n", serverId, port, publicAddress);
++        loop.scheduleWithFixedDelay(this::tick, 1, 1, TimeUnit.SECONDS);
++    }
++
++    private String checkLogin(final String username, final SocketAddress remote) {
++        final String ip = remote instanceof InetSocketAddress inet && inet.getAddress() != null
++                ? inet.getAddress().getHostAddress() : String.valueOf(remote);
++        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
++            final LobbySlot s = lobby.getSlot(i);
++            if (s.getType() == LobbySlotType.REMOTE && username.equalsIgnoreCase(s.getName()) && !server.isMatchActive()) {
++                return "That player is already seated on this server.";
++            }
++        }
++        return rewards.loginCheck(username, ip);
++    }
++
++    private void tick() {
++        try {
++            final HostedMatch hosted = lobby.getHostedMatch();
++            if (hosted == null && matchId == null) {
++                maybeStartMatch();
++            } else if (hosted != null && matchId != null && !reported) {
++                watchMatch(hosted);
++            }
++            if (System.currentTimeMillis() - lastHeartbeat > HEARTBEAT_SECONDS * 1000L) {
++                lastHeartbeat = System.currentTimeMillis();
++                sendHeartbeat();
++            }
++        } catch (final Throwable t) {
++            System.err.println("[server] tick failed");
++            t.printStackTrace();
++        }
++    }
++
++    private List<LobbySlot> remoteSlots() {
++        final List<LobbySlot> out = new ArrayList<>();
++        for (int i = 0; i < lobby.getNumberOfSlots(); i++) {
++            final LobbySlot s = lobby.getSlot(i);
++            if (s.getType() == LobbySlotType.REMOTE) {
++                out.add(s);
++            }
++        }
++        return out;
++    }
++
++    private void maybeStartMatch() {
++        final List<LobbySlot> seats = remoteSlots();
++        if (seats.size() < 2 || !seats.stream().allMatch(LobbySlot::isReady)) {
++            startRefusedNotified = false;
++            return;
++        }
++        final Runnable start = lobby.startGame();
++        if (start == null) {
++            if (!startRefusedNotified) {
++                startRefusedNotified = true;
++                server.broadcast(MessageEvent.warning(
++                        "Match could not start: both players need a legal Constructed deck. Fix your deck and press Ready again."));
++                for (final LobbySlot s : seats) {
++                    s.setIsReady(false);
++                }
++                server.updateLobbyState();
++            }
++            return;
++        }
++        matchId = UUID.randomUUID().toString();
++        matchStartedAt = System.currentTimeMillis();
++        seatedPlayers = seats.stream().map(LobbySlot::getName).toList();
++        DedicatedHooks.leavers.clear();
++        System.out.printf("[match %s] starting: %s%n", matchId, seatedPlayers);
++        start.run();
++        server.broadcast(new MessageEvent("Ranked match " + matchId.substring(0, 8) + " started. Good luck!"));
++    }
++
++    private void watchMatch(final HostedMatch hosted) {
++        final Match match = hosted.getMatch();
++        final boolean over = match != null && match.isMatchOver();
++        final boolean timedOut = System.currentTimeMillis() - matchStartedAt > maxMatchMillis;
++        if (!over && !timedOut) {
++            return;
++        }
++        reported = true;
++        if (over) {
++            report(match);
++        } else {
++            System.out.printf("[match %s] exceeded %d minutes, abandoned without a result%n",
++                    matchId, TimeUnit.MILLISECONDS.toMinutes(maxMatchMillis));
++            server.broadcast(MessageEvent.warning("Match time limit reached. This match does not count."));
++        }
++        server.broadcast(new MessageEvent("This server restarts for the next match once both players leave the result screen."));
++        final long deadline = System.currentTimeMillis() + EXIT_GRACE_SECONDS * 1000L;
++        loop.scheduleWithFixedDelay(() -> {
++            // Players leave by quitting from the result screen (the match closes) or disconnecting
++            final boolean everyoneLeft = lobby.getHostedMatch() == null || remoteSlots().isEmpty();
++            if (everyoneLeft || System.currentTimeMillis() > deadline) {
++                System.out.println("[server] match finished, exiting for restart");
++                server.stopServer();
++                System.exit(0);
++            }
++        }, 2, 2, TimeUnit.SECONDS);
++    }
++
++    private void report(final Match match) {
++        GameOutcome last = null;
++        for (final GameOutcome o : match.getOutcomes()) {
++            last = o;
++        }
++        String winner = null;
++        int turns = 0;
++        if (last != null) {
++            turns = last.getLastTurnNumber();
++            if (!last.isDraw() && last.getWinningLobbyPlayer() != null) {
++                winner = last.getWinningLobbyPlayer().getName();
++            }
++        }
++        final List<Map<String, Object>> players = new ArrayList<>();
++        for (final String name : seatedPlayers) {
++            final Map<String, Object> p = new LinkedHashMap<>();
++            p.put("username", name);
++            p.put("leaver", DedicatedHooks.leavers.contains(name));
++            players.add(p);
++        }
++        final Map<String, Object> body = new LinkedHashMap<>();
++        body.put("matchId", matchId);
++        body.put("serverId", serverId);
++        body.put("players", players);
++        body.put("winner", winner);
++        body.put("turns", turns);
++        body.put("durationSec", (System.currentTimeMillis() - matchStartedAt) / 1000);
++        System.out.printf("[match %s] over: winner=%s turns=%d leavers=%s%n", matchId, winner, turns, DedicatedHooks.leavers);
++        try {
++            rewards.reportMatch(matchId, body);
++        } catch (final Exception e) {
++            System.err.println("[match " + matchId + "] could not spool result: " + e);
++        }
++    }
++
++    private void sendHeartbeat() {
++        final Map<String, Object> body = new LinkedHashMap<>();
++        body.put("serverId", serverId);
++        body.put("address", publicAddress);
++        body.put("status", matchId != null ? "playing" : remoteSlots().size() >= 2 ? "full" : "waiting");
++        body.put("players", remoteSlots().stream().map(LobbySlot::getName).toList());
++        rewards.heartbeat(body);
++    }
++
++    private static String env(final String name, final String fallback) {
++        final String v = System.getenv(name);
++        return v == null || v.isBlank() ? fallback : v.trim();
++    }
++
++    private static String require(final String name) {
++        final String v = env(name, null);
++        if (v == null) {
++            System.err.println("Missing required environment variable " + name);
++            System.exit(2);
++        }
++        return v;
++    }
++}
+diff --git a/forge-gui-desktop/src/main/java/forge/server/HeadlessServerGui.java b/forge-gui-desktop/src/main/java/forge/server/HeadlessServerGui.java
+new file mode 100644
+index 00000000..e9c16454
+--- /dev/null
++++ b/forge-gui-desktop/src/main/java/forge/server/HeadlessServerGui.java
+@@ -0,0 +1,71 @@
++package forge.server;
++
++import forge.GuiDesktop;
++import forge.gamemodes.match.HostedMatch;
++import forge.gui.interfaces.IGuiGame;
++import forge.localinstance.skin.FSkinProp;
++import forge.localinstance.skin.ISkinImage;
++import forge.sound.IAudioClip;
++import forge.sound.IAudioMusic;
++
++import java.util.List;
++
++/**
++ * GUI backend for the dedicated server: no windows, no sound, and no local match screen.
++ * Every dialog the engine raises is logged and dismissed.
++ */
++final class HeadlessServerGui extends GuiDesktop {
++    @Override
++    public HostedMatch hostMatch() {
++        // GuiDesktop registers the match with the Swing controller, which does not exist here
++        return new HostedMatch();
++    }
++
++    @Override
++    public IGuiGame getNewGuiGame() {
++        throw new IllegalStateException("The dedicated server has no local seat");
++    }
++
++    @Override
++    public int showOptionDialog(final String message, final String title, final FSkinProp icon,
++                                final List<String> options, final int defaultOption) {
++        System.out.println("[dialog dismissed] " + title + ": " + message);
++        return -1;
++    }
++
++    @Override
++    public void showImageDialog(final ISkinImage image, final String message, final String title) {
++        System.out.println("[dialog] " + title + ": " + message);
++    }
++
++    @Override
++    public String showInputDialog(final String message, final String title, final FSkinProp icon,
++                                  final String initialInput, final List<String> inputOptions, final boolean isNumeric) {
++        System.out.println("[input dismissed] " + title + ": " + message);
++        return initialInput != null ? initialInput : "";
++    }
++
++    @Override
++    public String showFileDialog(final String title, final String defaultDir) {
++        return null;
++    }
++
++    @Override
++    public void showBugReportDialog(final String title, final String text, final boolean showExitAppBtn) {
++        System.err.println("[bug report] " + title + "\n" + text);
++    }
++
++    @Override
++    public IAudioClip createAudioClip(final String filename) {
++        return null;
++    }
++
++    @Override
++    public IAudioMusic createAudioMusic(final String filename) {
++        return null;
++    }
++
++    @Override
++    public void startAltSoundSystem(final String filename, final boolean isSynchronized) {
++    }
++}
+diff --git a/forge-gui-desktop/src/main/java/forge/server/RewardsClient.java b/forge-gui-desktop/src/main/java/forge/server/RewardsClient.java
+new file mode 100644
+index 00000000..26ede1a7
+--- /dev/null
++++ b/forge-gui-desktop/src/main/java/forge/server/RewardsClient.java
+@@ -0,0 +1,123 @@
++package forge.server;
++
++import com.google.gson.Gson;
++import com.google.gson.JsonObject;
++
++import javax.crypto.Mac;
++import javax.crypto.spec.SecretKeySpec;
++import java.io.IOException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.time.Duration;
++import java.util.HexFormat;
++import java.util.Map;
++import java.util.stream.Stream;
++
++/**
++ * Talks to the rewards service. Every request is signed with the shared game-server secret:
++ * header X-Signature = hex(HMAC-SHA256(secret, timestamp + "." + body)).
++ */
++final class RewardsClient {
++    private static final Gson GSON = new Gson();
++
++    private final String baseUrl;
++    private final byte[] secret;
++    private final Path spoolDir;
++    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
++
++    RewardsClient(final String baseUrl, final String secret, final Path spoolDir) {
++        this.baseUrl = baseUrl.replaceAll("/+$", "");
++        this.secret = secret.getBytes(StandardCharsets.UTF_8);
++        this.spoolDir = spoolDir;
++    }
++
++    /** @return null if the player may sit down, otherwise the reason to show them. */
++    String loginCheck(final String username, final String ip) {
++        try {
++            final JsonObject res = post("/api/gs/login-check", Map.of("username", username, "ip", ip));
++            if (res.has("ok") && res.get("ok").getAsBoolean()) {
++                return null;
++            }
++            return res.has("reason") ? res.get("reason").getAsString() : "Login refused.";
++        } catch (final Exception e) {
++            System.err.println("[rewards] login check failed: " + e);
++            return "Ranked server cannot reach the rewards service right now. Try again in a minute.";
++        }
++    }
++
++    void heartbeat(final Map<String, Object> body) {
++        try {
++            post("/api/gs/heartbeat", body);
++        } catch (final Exception e) {
++            System.err.println("[rewards] heartbeat failed: " + e);
++        }
++    }
++
++    /**
++     * Writes the result to disk first, then sends it. Anything still on disk (because the
++     * rewards service was down) is re-sent by {@link #flushSpool()} on the next start.
++     */
++    void reportMatch(final String matchId, final Map<String, Object> body) throws IOException {
++        Files.createDirectories(spoolDir);
++        final Path file = spoolDir.resolve(matchId + ".json");
++        Files.writeString(file, GSON.toJson(body));
++        sendSpooled(file);
++    }
++
++    void flushSpool() {
++        if (!Files.isDirectory(spoolDir)) {
++            return;
++        }
++        try (Stream<Path> files = Files.list(spoolDir)) {
++            files.filter(f -> f.toString().endsWith(".json")).forEach(this::sendSpooled);
++        } catch (final IOException e) {
++            System.err.println("[rewards] cannot read spool: " + e);
++        }
++    }
++
++    private void sendSpooled(final Path file) {
++        try {
++            final String body = Files.readString(file);
++            final JsonObject res = postRaw("/api/gs/match-result", body);
++            System.out.println("[rewards] match reported: " + res);
++            Files.deleteIfExists(file);
++        } catch (final Exception e) {
++            System.err.println("[rewards] match report kept for retry (" + file.getFileName() + "): " + e);
++        }
++    }
++
++    private JsonObject post(final String path, final Object body) throws IOException, InterruptedException {
++        return postRaw(path, GSON.toJson(body));
++    }
++
++    private JsonObject postRaw(final String path, final String body) throws IOException, InterruptedException {
++        final String ts = Long.toString(System.currentTimeMillis() / 1000);
++        final HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + path))
++                .timeout(Duration.ofSeconds(5))
++                .header("content-type", "application/json")
++                .header("x-timestamp", ts)
++                .header("x-signature", sign(ts + "." + body))
++                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
++                .build();
++        final HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
++        if (res.statusCode() / 100 != 2) {
++            throw new IOException("HTTP " + res.statusCode() + " from " + path + ": " + res.body());
++        }
++        return GSON.fromJson(res.body(), JsonObject.class);
++    }
++
++    private String sign(final String payload) {
++        try {
++            final Mac mac = Mac.getInstance("HmacSHA256");
++            mac.init(new SecretKeySpec(secret, "HmacSHA256"));
++            return HexFormat.of().formatHex(mac.doFinal(payload.getBytes(StandardCharsets.UTF_8)));
++        } catch (final Exception e) {
++            throw new IllegalStateException(e);
++        }
++    }
++}
+diff --git a/forge-gui-desktop/src/main/java/forge/view/Main.java b/forge-gui-desktop/src/main/java/forge/view/Main.java
+index 8f1b018d..b7fa06a5 100644
+--- a/forge-gui-desktop/src/main/java/forge/view/Main.java
++++ b/forge-gui-desktop/src/main/java/forge/view/Main.java
+@@ -109,8 +109,9 @@ public final class Main {
+                 break;
+ 
+             case "server":
+-                System.out.println("Dedicated server mode.\nNot implemented.");
+-                break;
++                // Keeps running on its own non-daemon thread and exits itself after each match
++                forge.server.DedicatedServer.run(args);
++                return;
+ 
+             default:
+                 System.out.println("Unknown mode.\nKnown modes are 'sim', 'parse', 'server'");
+diff --git a/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
+new file mode 100644
+index 00000000..296d58bb
+--- /dev/null
++++ b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
+@@ -0,0 +1,61 @@
++package forge.net;
++
++import forge.deck.Deck;
++import forge.gamemodes.net.event.UpdateLobbyPlayerEvent;
++import forge.interfaces.IGameController;
++
++import java.lang.reflect.Field;
++
++/**
++ * Manual smoke test for {@code forge server}: two scripted players join a running dedicated
++ * server, ready up with legal 60-card decks, and the first one concedes once the game starts.
++ *
++ * <pre>
++ *   java -cp ... forge.net.DedicatedServerSmoke host port nameA nameB
++ * </pre>
++ * Exit code 0 means both players were seated and the game started; verify the reported
++ * result on the rewards service.
++ */
++public final class DedicatedServerSmoke {
++    public static void main(final String[] args) throws Exception {
++        final String host = args[0];
++        final int port = Integer.parseInt(args[1]);
++        TestUtils.ensureFModelInitialized();
++
++        try (HeadlessNetworkClient a = new HeadlessNetworkClient(args[2], host, port);
++             HeadlessNetworkClient b = new HeadlessNetworkClient(args[3], host, port)) {
++            for (final HeadlessNetworkClient c : new HeadlessNetworkClient[] {a, b}) {
++                if (!c.connect(15_000)) {
++                    System.err.println("SMOKE: connect failed");
++                    System.exit(1);
++                }
++                Thread.sleep(500);
++                final Deck deck = TestDeckLoader.createMinimalDeck("Forest", 60);
++                c.getClient().send(UpdateLobbyPlayerEvent.deckUpdate(deck));
++                Thread.sleep(500);
++                c.setReady();
++            }
++            if (!a.waitForGameStart(60_000) || !b.waitForGameStart(60_000)) {
++                System.err.println("SMOKE: game did not start");
++                System.exit(1);
++            }
++            System.out.println("SMOKE: game started, " + args[2] + " concedes");
++            Thread.sleep(3_000);
++            concede(a);
++            // The scripted clients never press Quit on the result screen, so instead of waiting for
++            // the match to close, check the result on the rewards service (GET /api/leaderboard).
++            Thread.sleep(10_000);
++            System.out.println("SMOKE: conceded; the server should now report " + args[3] + " as the winner");
++            System.exit(0);
++        }
++    }
++
++    private static void concede(final HeadlessNetworkClient client) throws Exception {
++        final Field guiField = HeadlessNetworkClient.class.getDeclaredField("guiGame");
++        guiField.setAccessible(true);
++        final Object gui = guiField.get(client);
++        final Field ctrlField = gui.getClass().getDeclaredField("gameController");
++        ctrlField.setAccessible(true);
++        ((IGameController) ctrlField.get(gui)).concede();
++    }
++}
+diff --git a/forge-gui/src/main/java/forge/gamemodes/net/server/DedicatedHooks.java b/forge-gui/src/main/java/forge/gamemodes/net/server/DedicatedHooks.java
+new file mode 100644
+index 00000000..20ec1b7b
+--- /dev/null
++++ b/forge-gui/src/main/java/forge/gamemodes/net/server/DedicatedHooks.java
+@@ -0,0 +1,29 @@
++package forge.gamemodes.net.server;
++
++import java.net.SocketAddress;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++
++/**
++ * Switches that turn the normal player-hosted server into a dedicated server with no
++ * local player. Everything here is inert unless {@link #dedicated} is set, so ordinary
++ * desktop/mobile hosting behaves exactly as before.
++ */
++public final class DedicatedHooks {
++    private DedicatedHooks() { }
++
++    /** Decides whether a connecting player may take a seat. */
++    public interface LoginGate {
++        /** @return null to admit the player, otherwise the reason shown to them before disconnecting */
++        String check(String username, SocketAddress remoteAddress);
++    }
++
++    /** When true the lobby has no LOCAL host seat and players may not rename themselves. */
++    public static volatile boolean dedicated = false;
++
++    /** Consulted for every login, including reconnects. Null admits everyone. */
++    public static volatile LoginGate loginGate = null;
++
++    /** Usernames whose seat was handed to the AI after they failed to reconnect in time. */
++    public static final Set<String> leavers = ConcurrentHashMap.newKeySet();
++}
+diff --git a/forge-gui/src/main/java/forge/gamemodes/net/server/FServerManager.java b/forge-gui/src/main/java/forge/gamemodes/net/server/FServerManager.java
+index cc86b70d..09a0648b 100644
+--- a/forge-gui/src/main/java/forge/gamemodes/net/server/FServerManager.java
++++ b/forge-gui/src/main/java/forge/gamemodes/net/server/FServerManager.java
+@@ -1008,6 +1008,9 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server
+         // The match's later games seat players from here
+         p.getRegisteredPlayer().setPlayer(aiLobbyPlayer);
+         netLog.info("[Reconnect] Converted slot {} ({}) to AI controller", slotIndex, p.getName());
++        if (client.getUsername() != null) {
++            DedicatedHooks.leavers.add(client.getUsername());
++        }
+ 
+         // Clear InputQueue to unblock the game thread (waiting on cdlDone)
+         pch.getInputQueue().clearInputs();
+@@ -1096,6 +1099,17 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server
+                 // point of intake keeps the parked key and the reconnect
+                 // lookup in agreement.
+                 final String username = LogSafe.forDisplay(event.getUsername(), maxNameLength());
++                final DedicatedHooks.LoginGate gate = DedicatedHooks.loginGate;
++                if (gate != null) {
++                    // Checked before the reconnect lookup too, so nobody can take over a
++                    // disconnected player's seat just by connecting with their name.
++                    final String refusal = gate.check(username, ctx.channel().remoteAddress());
++                    if (refusal != null) {
++                        netLog.info("[Gate] Refused {} from {}: {}", username, ctx.channel().remoteAddress(), refusal);
++                        ctx.writeAndFlush(MessageEvent.warning(refusal)).addListener(ChannelFutureListener.CLOSE);
++                        return;
++                    }
++                }
+                 client.setUsername(username);
+ 
+                 // Check if this is a reconnecting player
+@@ -1193,7 +1207,12 @@ public final class FServerManager implements IHasForgeLog, HostingServer.Server
+                 // Clean the name before it reaches the slot, not just before it
+                 // reaches our own record of the client: the slot name is what
+                 // every peer renders and what broadcastReadyState echoes.
+-                final String newName = LogSafe.forDisplay(event.getName(), maxNameLength());
++                String newName = LogSafe.forDisplay(event.getName(), maxNameLength());
++                if (DedicatedHooks.dedicated && newName != null && !newName.equals(client.getUsername())) {
++                    // The name is the player's verified account; renaming would detach the seat from it
++                    netLog.warn("Ignoring rename of slot {} ({}) to {}", client.getIndex(), client.getUsername(), newName);
++                    newName = null;
++                }
+                 event.setName(newName);
+                 localLobby.applyToSlot(client.getIndex(), event);
+                 if (newName != null) {
+diff --git a/forge-gui/src/main/java/forge/gamemodes/net/server/ServerGameLobby.java b/forge-gui/src/main/java/forge/gamemodes/net/server/ServerGameLobby.java
+index c35f1d20..b47ce57d 100644
+--- a/forge-gui/src/main/java/forge/gamemodes/net/server/ServerGameLobby.java
++++ b/forge-gui/src/main/java/forge/gamemodes/net/server/ServerGameLobby.java
+@@ -70,7 +70,12 @@ public final class ServerGameLobby extends GameLobby implements IHasForgeLog {
+         final int[] avatarIndices = localAvatarIndices();
+         final int[] sleeveIndices = localSleeveIndices();
+ 
+-        addSlot(new LobbySlot(LobbySlotType.LOCAL, localName(), avatarIndices[0], sleeveIndices[0], 0, true, false, Collections.emptySet()));
++        if (DedicatedHooks.dedicated) {
++            // No one plays from the server machine: both seats wait for remote players
++            addSlot(new LobbySlot(LobbySlotType.OPEN, null, avatarIndices[0], sleeveIndices[0], 0, false, false, Collections.emptySet()));
++        } else {
++            addSlot(new LobbySlot(LobbySlotType.LOCAL, localName(), avatarIndices[0], sleeveIndices[0], 0, true, false, Collections.emptySet()));
++        }
+         // Seeded while open so the seat has art the moment it is taken; a connecting client replaces both
+         addSlot(new LobbySlot(LobbySlotType.OPEN, null, avatarIndices[1], sleeveIndices[1], 1, false, false, Collections.emptySet()));
+     }
