@@ -146,23 +146,44 @@ function setToken(t) {
 }
 
 function provider() {
-  return window.phantom?.solana || window.solflare || window.solana || null;
+  // Ask Phantom by its own name first, so other wallet extensions can't intercept the request.
+  if (window.phantom?.solana?.isPhantom) return window.phantom.solana;
+  if (window.solflare?.isSolflare) return window.solflare;
+  return window.solana || null;
 }
 
 $("connectBtn").onclick = async () => {
   if (token) { setToken(null); return render(); }
   const p = provider();
   if (!p) { alert("Install a Solana wallet (Phantom, Solflare) to sign in."); return; }
+  const btn = $("connectBtn");
+  btn.disabled = true;
+  btn.textContent = "Check your wallet…";
   try {
-    const { publicKey } = await p.connect();
-    const wallet = publicKey.toString();
-    const { message } = await api("/api/auth/nonce", { method: "POST", body: { wallet } });
-    const signed = await p.signMessage(new TextEncoder().encode(message), "utf8");
-    const sig = signed.signature || signed;
-    const { token: t } = await api("/api/auth/verify", { method: "POST", body: { wallet, signature: b58(sig) } });
+    let wallet, message, sig;
+    if (typeof p.signIn === "function") {
+      // Sign In With Solana: the wallet connects, shows a sign-in screen and signs in one step.
+      const { input } = await api("/api/auth/nonce", { method: "POST", body: {} });
+      const out = await p.signIn(input);
+      const addr = out.account?.address ?? out.address;
+      wallet = typeof addr === "string" ? addr : addr.toString();
+      message = new TextDecoder().decode(out.signedMessage);
+      sig = out.signature;
+    } else {
+      const { publicKey } = await p.connect();
+      wallet = publicKey.toString();
+      ({ message } = await api("/api/auth/nonce", { method: "POST", body: { wallet } }));
+      const signed = await p.signMessage(new TextEncoder().encode(message), "utf8");
+      sig = signed.signature || signed;
+    }
+    const { token: t } = await api("/api/auth/verify", { method: "POST", body: { wallet, message, signature: b58(sig) } });
     setToken(t);
+  } catch (e) {
+    alert((e && e.message) || String(e));
+  } finally {
+    btn.disabled = false;
     render();
-  } catch (e) { alert(e.message || e); }
+  }
 };
 
 $("nameBtn").onclick = async () => {

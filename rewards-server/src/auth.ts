@@ -33,27 +33,68 @@ export function verifyWalletSignature(wallet: string, message: string, signature
   }
 }
 
-export function issueNonce(db: DB, wallet: string, origin: string): string {
-  const nonce = randomBytes(16).toString("hex");
-  const message =
-    `Sign in to ${origin}\n\n` +
-    `This only proves you own this wallet. It does not move funds.\n\n` +
-    `Wallet: ${wallet}\nNonce: ${nonce}\nIssued: ${new Date().toISOString()}`;
-  db.prepare(
-    `INSERT INTO auth_nonces (wallet, nonce, message, expires_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT(wallet) DO UPDATE SET nonce = excluded.nonce, message = excluded.message, expires_at = excluded.expires_at`,
-  ).run(wallet, nonce, message, now() + NONCE_TTL);
-  return message;
+/** Fields for a Sign In With Solana (SIWS) request; wallets build the message text from these. */
+export interface SignInInput {
+  domain: string;
+  statement: string;
+  uri: string;
+  version: "1";
+  chainId: "mainnet";
+  nonce: string;
+  issuedAt: string;
+  expirationTime: string;
 }
 
-/** Consumes the nonce. Returns a session token, or null if the signature is wrong or stale. */
-export function verifySignIn(db: DB, wallet: string, signature: string): { token: string; accountId: number } | null {
-  const row = db.prepare(`SELECT message, expires_at FROM auth_nonces WHERE wallet = ?`).get(wallet) as
-    | { message: string; expires_at: number }
-    | undefined;
-  if (!row || row.expires_at < now()) return null;
-  if (!verifyWalletSignature(wallet, row.message, signature)) return null;
-  db.prepare(`DELETE FROM auth_nonces WHERE wallet = ?`).run(wallet);
+const STATEMENT = "Sign in to play ranked. This only proves you own this wallet; it does not move funds.";
+
+/** The SIWS message text, in the same layout wallets produce for solana:signIn. */
+export function siwsMessage(input: SignInInput, address: string): string {
+  return (
+    `${input.domain} wants you to sign in with your Solana account:\n${address}\n\n${input.statement}\n\n` +
+    `URI: ${input.uri}\nVersion: ${input.version}\nChain ID: ${input.chainId}\nNonce: ${input.nonce}\n` +
+    `Issued At: ${input.issuedAt}\nExpiration Time: ${input.expirationTime}`
+  );
+}
+
+/** Starts a sign-in. Returns the SIWS fields, plus the full message when the wallet is already known. */
+export function issueNonce(db: DB, origin: string, wallet?: string): { input: SignInInput; message?: string } {
+  const nonce = randomBytes(16).toString("hex");
+  const issued = now();
+  const input: SignInInput = {
+    domain: new URL(origin).host,
+    statement: STATEMENT,
+    uri: origin,
+    version: "1",
+    chainId: "mainnet",
+    nonce,
+    issuedAt: new Date(issued * 1000).toISOString(),
+    expirationTime: new Date((issued + NONCE_TTL) * 1000).toISOString(),
+  };
+  db.prepare(`DELETE FROM siws_nonces WHERE expires_at < ?`).run(issued);
+  db.prepare(`INSERT INTO siws_nonces (nonce, expires_at) VALUES (?, ?)`).run(nonce, issued + NONCE_TTL);
+  return { input, message: wallet ? siwsMessage(input, wallet) : undefined };
+}
+
+/**
+ * Checks a signed SIWS message: it must name our domain and the signing wallet, carry a nonce we
+ * issued that has not expired or been used, and be signed by that wallet. Consumes the nonce.
+ * Returns a session token, or null.
+ */
+export function verifySignIn(
+  db: DB,
+  origin: string,
+  wallet: string,
+  message: string,
+  signature: string,
+): { token: string; accountId: number } | null {
+  const lines = message.split("\n");
+  if (lines[0] !== `${new URL(origin).host} wants you to sign in with your Solana account:`) return null;
+  if (lines[1] !== wallet) return null;
+  const nonce = lines.find((l) => l.startsWith("Nonce: "))?.slice(7);
+  if (!nonce) return null;
+  if (!verifyWalletSignature(wallet, message, signature)) return null;
+  const used = db.prepare(`DELETE FROM siws_nonces WHERE nonce = ? AND expires_at >= ?`).run(nonce, now());
+  if (used.changes !== 1) return null;
 
   db.prepare(`INSERT OR IGNORE INTO accounts (wallet, created_at) VALUES (?, ?)`).run(wallet, now());
   const acct = db.prepare(`SELECT id FROM accounts WHERE wallet = ?`).get(wallet) as { id: number };

@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import bs58 from "bs58";
 import { createApp } from "../src/app.js";
-import { signServerRequest } from "../src/auth.js";
+import { signServerRequest, siwsMessage } from "../src/auth.js";
 import { type Config, fromBaseUnits, toBaseUnits, validateGoals } from "../src/config.js";
 import { openDb, type DB } from "../src/db.js";
 import { dryRunTransfer, processNextPayout, type Transfer } from "../src/payouts.js";
@@ -91,7 +91,7 @@ async function gs(path: string, body: unknown, secret = SECRET) {
 async function signUp(name: string) {
   const p = new Player();
   const { body } = await call("POST", "/api/auth/nonce", { wallet: p.wallet });
-  const v = await call("POST", "/api/auth/verify", { wallet: p.wallet, signature: p.signText(body.message) });
+  const v = await call("POST", "/api/auth/verify", { wallet: p.wallet, message: body.message, signature: p.signText(body.message) });
   assert.equal(v.status, 200);
   p.token = v.body.token;
   assert.equal((await call("POST", "/api/me/username", { username: name }, as(p))).status, 200);
@@ -134,26 +134,58 @@ describe("units", () => {
 });
 
 describe("sign-in", () => {
+  const verify = (p: Player, message: string, signer: Player = p) =>
+    call("POST", "/api/auth/verify", { wallet: p.wallet, message, signature: signer.signText(message) });
+
+  test("message follows the Sign In With Solana layout for our domain", async () => {
+    const p = new Player();
+    const { body } = await call("POST", "/api/auth/nonce", { wallet: p.wallet });
+    assert.ok(body.message.startsWith(`play.test wants you to sign in with your Solana account:\n${p.wallet}\n`));
+    assert.match(body.message, new RegExp(`\nNonce: ${body.input.nonce}\n`));
+  });
+
+  test("accepts a message the wallet built itself from the signIn input", async () => {
+    const p = new Player();
+    const { body } = await call("POST", "/api/auth/nonce", {});
+    assert.equal(body.message, undefined);
+    assert.equal(body.input.domain, "play.test");
+    const r = await verify(p, siwsMessage(body.input, p.wallet));
+    assert.equal(r.status, 200);
+    assert.ok(r.body.token);
+  });
+
   test("rejects a signature from a different wallet", async () => {
     const p = new Player();
-    const other = new Player();
     const { body } = await call("POST", "/api/auth/nonce", { wallet: p.wallet });
-    const v = await call("POST", "/api/auth/verify", { wallet: p.wallet, signature: other.signText(body.message) });
-    assert.equal(v.status, 401);
+    assert.equal((await verify(p, body.message, new Player())).status, 401);
   });
+
+  test("rejects messages for another domain, another wallet or an unknown nonce", async () => {
+    const p = new Player();
+    const { body } = await call("POST", "/api/auth/nonce", {});
+    const otherDomain = siwsMessage({ ...body.input, domain: "evil.test" }, p.wallet);
+    assert.equal((await verify(p, otherDomain)).status, 401);
+    const otherWallet = siwsMessage(body.input, new Player().wallet);
+    assert.equal((await verify(p, otherWallet)).status, 401);
+    const madeUpNonce = siwsMessage({ ...body.input, nonce: "f".repeat(32) }, p.wallet);
+    assert.equal((await verify(p, madeUpNonce)).status, 401);
+    // the real nonce is still usable after those failures
+    assert.equal((await verify(p, siwsMessage(body.input, p.wallet))).status, 200);
+  });
+
   test("a nonce can only be used once", async () => {
     const p = new Player();
     const { body } = await call("POST", "/api/auth/nonce", { wallet: p.wallet });
-    const sig = p.signText(body.message);
-    assert.equal((await call("POST", "/api/auth/verify", { wallet: p.wallet, signature: sig })).status, 200);
-    assert.equal((await call("POST", "/api/auth/verify", { wallet: p.wallet, signature: sig })).status, 401);
+    assert.equal((await verify(p, body.message)).status, 200);
+    assert.equal((await verify(p, body.message)).status, 401);
   });
+
   test("username is unique and permanent", async () => {
     const p = await signUp("alice_1");
     assert.equal((await call("POST", "/api/me/username", { username: "other" }, as(p))).status, 409);
     const q = new Player();
     const { body } = await call("POST", "/api/auth/nonce", { wallet: q.wallet });
-    q.token = (await call("POST", "/api/auth/verify", { wallet: q.wallet, signature: q.signText(body.message) })).body.token;
+    q.token = (await verify(q, body.message)).body.token;
     assert.equal((await call("POST", "/api/me/username", { username: "ALICE_1" }, as(q))).status, 409);
   });
 });

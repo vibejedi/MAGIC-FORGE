@@ -80,15 +80,17 @@ export function createApp(db: DB, cfg: Config) {
   // ---------- player auth ----------
   app.post("/api/auth/nonce", (req, res) => {
     const { wallet } = req.body ?? {};
-    if (!isWalletAddress(wallet)) return res.status(400).json({ error: "invalid wallet address" });
-    res.json({ message: issueNonce(db, wallet, cfg.publicOrigin) });
+    if (wallet !== undefined && !isWalletAddress(wallet)) return res.status(400).json({ error: "invalid wallet address" });
+    res.json(issueNonce(db, cfg.publicOrigin, wallet));
   });
 
   app.post("/api/auth/verify", (req, res) => {
-    const { wallet, signature } = req.body ?? {};
-    if (!isWalletAddress(wallet) || typeof signature !== "string") return res.status(400).json({ error: "bad request" });
-    const out = verifySignIn(db, wallet, signature);
-    if (!out) return res.status(401).json({ error: "signature check failed, request a new message" });
+    const { wallet, signature, message } = req.body ?? {};
+    if (!isWalletAddress(wallet) || typeof signature !== "string" || typeof message !== "string" || message.length > 2000) {
+      return res.status(400).json({ error: "bad request" });
+    }
+    const out = verifySignIn(db, cfg.publicOrigin, wallet, message, signature);
+    if (!out) return res.status(401).json({ error: "signature check failed, please try signing in again" });
     res.json({ token: out.token });
   });
 

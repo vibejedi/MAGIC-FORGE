@@ -16,10 +16,9 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at  INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS auth_nonces (
-  wallet      TEXT PRIMARY KEY,
-  nonce       TEXT NOT NULL,
-  message     TEXT NOT NULL,
+-- One-time nonces for Sign In With Solana messages.
+CREATE TABLE IF NOT EXISTS siws_nonces (
+  nonce       TEXT PRIMARY KEY,
   expires_at  INTEGER NOT NULL
 );
 
