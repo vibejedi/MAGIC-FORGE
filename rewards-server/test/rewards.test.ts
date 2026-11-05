@@ -47,6 +47,12 @@ function makeConfig(over: Partial<Config> = {}): Config {
     solanaRpcUrl: "",
     rewardMint: "",
     treasurySecretKey: "",
+    streamSlots: 0,
+    streamSecret: "",
+    streamSubnetPrefix: "172.30.0.",
+    streamPortBase: 6080,
+    streamSessionMinutes: 90,
+    streamAllowedUsers: [],
     ...over,
   };
 }

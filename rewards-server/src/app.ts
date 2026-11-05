@@ -5,6 +5,9 @@ import { accountForSession, isWalletAddress, issueNonce, safeEqual, verifyServer
 import { type Config, fromBaseUnits } from "./config.js";
 import { type DB, now } from "./db.js";
 import { approveClaim, ClaimError, claimReward, rejectClaim, resolveReview } from "./payouts.js";
+import {
+  cookieHeader, slotAssignment, startStream, stopStream, StreamError, streamHttpProxy, streamStatus,
+} from "./stream.js";
 import { ladderSeason, leaderboard, type MatchReport, recordAiMatch, recordMatch } from "./ranking.js";
 
 const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
@@ -30,6 +33,9 @@ export function createApp(db: DB, cfg: Config) {
       },
     }),
   );
+
+  // Browser play: the noVNC page and assets for a claimed slot (WebSockets are handled in server.ts).
+  if (cfg.streamSlots > 0) app.use("/stream", (req, res) => streamHttpProxy(db, cfg)(Object.assign(req, { url: req.originalUrl }), res));
 
   const here = dirname(fileURLToPath(import.meta.url));
   app.use(express.static(join(here, "..", "public")));
@@ -147,6 +153,41 @@ export function createApp(db: DB, cfg: Config) {
        ON CONFLICT(account_id) DO UPDATE SET ip = excluded.ip, expires_at = excluded.expires_at`,
     ).run(req.accountId!, ip, expiresAt);
     res.json({ username: acct.username, ip, expiresAt });
+  });
+
+  // ---------- browser play ----------
+  const usernameOf = (id: number) =>
+    (db.prepare(`SELECT username FROM accounts WHERE id = ?`).get(id) as { username: string | null }).username;
+
+  app.get("/api/stream", requirePlayer, (req: AuthedRequest, res) => {
+    res.json(streamStatus(db, cfg, req.accountId!, usernameOf(req.accountId!)));
+  });
+
+  app.post("/api/stream/start", requirePlayer, (req: AuthedRequest, res) => {
+    try {
+      const s = startStream(db, cfg, req.accountId!);
+      res.setHeader("Set-Cookie", cookieHeader(cfg, s.ticket, cfg.streamSessionMinutes * 60));
+      res.json({ slot: s.slot, expiresAt: s.expiresAt, url: s.url });
+    } catch (e) {
+      if (e instanceof StreamError) return res.status(e.code).json({ error: e.message });
+      throw e;
+    }
+  });
+
+  app.post("/api/stream/stop", requirePlayer, (req: AuthedRequest, res) => {
+    stopStream(db, req.accountId!);
+    res.setHeader("Set-Cookie", cookieHeader(cfg, "", 0));
+    res.json({ ok: true });
+  });
+
+  /** Polled by each stream container's launcher, signed with STREAM_SECRET. */
+  app.post("/api/stream/assignment", (req: AuthedRequest, res) => {
+    if (cfg.streamSlots === 0) return res.status(404).json({ error: "browser play is off" });
+    const ok = verifyServerRequest(cfg.streamSecret, req.get("x-timestamp"), req.get("x-signature"), req.rawBody ?? "");
+    if (!ok) return res.status(401).json({ error: "bad signature" });
+    const slot = Number(req.body?.slot);
+    if (!Number.isInteger(slot) || slot < 1 || slot > cfg.streamSlots) return res.status(400).json({ error: "bad slot" });
+    res.json(slotAssignment(db, slot));
   });
 
   app.post("/api/rewards/:id/claim", requirePlayer, (req: AuthedRequest, res) => {

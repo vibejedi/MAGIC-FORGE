@@ -43,6 +43,14 @@ export interface Config {
   solanaRpcUrl: string;
   rewardMint: string;
   treasurySecretKey: string;
+  /** Browser play (Forge streamed through noVNC). 0 slots = off. */
+  streamSlots: number;
+  streamSecret: string;
+  streamSubnetPrefix: string;
+  streamPortBase: number;
+  streamSessionMinutes: number;
+  /** Lowercased usernames allowed to use browser play; "*" = every signed-in player, empty = nobody. */
+  streamAllowedUsers: string[];
 }
 
 const METRICS: Metric[] = ["wins", "games", "rating", "bestStreak"];
@@ -111,9 +119,21 @@ export function loadConfig(): Config {
     solanaRpcUrl: env("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"),
     rewardMint: env("REWARD_MINT", ""),
     treasurySecretKey: env("TREASURY_SECRET_KEY", ""),
+    streamSlots: int("STREAM_SLOTS", 0),
+    streamSecret: env("STREAM_SECRET", ""),
+    streamSubnetPrefix: env("STREAM_SUBNET_PREFIX", "172.30.0."),
+    streamPortBase: int("STREAM_PORT_BASE", 6080),
+    streamSessionMinutes: int("STREAM_SESSION_MINUTES", 90),
+    streamAllowedUsers: env("STREAM_ALLOWED_USERS", "")
+      .split(",")
+      .map((u) => u.trim().toLowerCase())
+      .filter(Boolean),
   };
   if (cfg.gameServerSecret.length < 32) throw new Error("GAME_SERVER_SECRET must be at least 32 characters");
   if (cfg.adminToken.length < 32) throw new Error("ADMIN_TOKEN must be at least 32 characters");
+  if (cfg.streamSlots > 0 && cfg.streamSecret.length < 32) {
+    throw new Error("STREAM_SLOTS > 0 needs STREAM_SECRET (at least 32 characters)");
+  }
   if (cfg.payoutMode === "live" && (!cfg.rewardMint || !cfg.treasurySecretKey)) {
     throw new Error("PAYOUT_MODE=live needs REWARD_MINT and TREASURY_SECRET_KEY");
   }

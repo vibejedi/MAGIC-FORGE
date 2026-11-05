@@ -22,10 +22,27 @@ RUN mkdir -p /out/lib \
  && cp -r forge-gui/res /out/forge-gui/res \
  && rm -rf /out/forge-gui/res/adventure /out/forge-gui/res/music /out/forge-gui/res/sound
 
-FROM eclipse-temurin:21-jre
+# `forge server`: the dedicated game server
+FROM eclipse-temurin:21-jre AS server
+# The JVM flags Forge's own launcher passes (module access for XStream, Netty, Swing).
+ENV FORGE_JVM_FLAGS="-Dio.netty.tryReflectionSetAccessible=true -Dfile.encoding=UTF-8 --add-opens java.desktop/java.beans=ALL-UNNAMED --add-opens java.desktop/javax.swing.border=ALL-UNNAMED --add-opens java.desktop/javax.swing.event=ALL-UNNAMED --add-opens java.desktop/sun.swing=ALL-UNNAMED --add-opens java.desktop/java.awt.image=ALL-UNNAMED --add-opens java.desktop/java.awt.color=ALL-UNNAMED --add-opens java.desktop/sun.awt.image=ALL-UNNAMED --add-opens java.desktop/javax.swing=ALL-UNNAMED --add-opens java.desktop/java.awt=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.desktop/java.awt.font=ALL-UNNAMED --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.math=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED"
 COPY --from=build /out /forge
 WORKDIR /forge/forge-gui-desktop
 ENV JAVA_OPTS="-Xmx1536m"
 # Forge's user folder (preferences, and results waiting to be re-sent) lives in /root/.forge
 VOLUME /root/.forge
-CMD ["sh", "-c", "exec java $JAVA_OPTS -Djava.awt.headless=true -cp target/classes:../forge-gui/target/classes:../forge-ai/target/classes:../forge-game/target/classes:../forge-core/target/classes:/forge/lib/* forge.view.Main server"]
+CMD ["sh", "-c", "exec java $JAVA_OPTS $FORGE_JVM_FLAGS -Djava.awt.headless=true -cp target/classes:../forge-gui/target/classes:../forge-ai/target/classes:../forge-game/target/classes:../forge-core/target/classes:/forge/lib/* forge.view.Main server"]
+
+# Browser play: the Forge desktop app on a virtual display, streamed with noVNC.
+FROM eclipse-temurin:21-jre AS stream
+ENV FORGE_JVM_FLAGS="-Dio.netty.tryReflectionSetAccessible=true -Dfile.encoding=UTF-8 --add-opens java.desktop/java.beans=ALL-UNNAMED --add-opens java.desktop/javax.swing.border=ALL-UNNAMED --add-opens java.desktop/javax.swing.event=ALL-UNNAMED --add-opens java.desktop/sun.swing=ALL-UNNAMED --add-opens java.desktop/java.awt.image=ALL-UNNAMED --add-opens java.desktop/java.awt.color=ALL-UNNAMED --add-opens java.desktop/sun.awt.image=ALL-UNNAMED --add-opens java.desktop/javax.swing=ALL-UNNAMED --add-opens java.desktop/java.awt=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.text=ALL-UNNAMED --add-opens java.desktop/java.awt.font=ALL-UNNAMED --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.math=ALL-UNNAMED --add-opens java.base/java.util.concurrent=ALL-UNNAMED --add-opens java.base/java.net=ALL-UNNAMED"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xvfb x11vnc novnc websockify openbox fonts-dejavu-core \
+      libxrender1 libxtst6 libxi6 curl openssl procps python3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash player
+COPY --from=build /out /forge
+COPY stream/ /opt/stream/
+RUN chmod 755 /opt/stream/launcher.sh && mkdir -p /home/player/.cache/forge && chown -R player:player /home/player
+EXPOSE 6080
+CMD ["/opt/stream/launcher.sh"]

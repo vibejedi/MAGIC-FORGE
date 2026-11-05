@@ -92,6 +92,18 @@
       <div class="msg" id="profileMsg"></div>
     </section>
 
+    <section id="browser" class="wide" hidden>
+      <h2>Play in your browser</h2>
+      <p class="small">Opens Forge in a new tab, running on our server: no download needed. Your player name is set for you and you're already cleared to join the ranked servers.
+        Inside Forge choose <b>Online Multiplayer → Join</b>, enter a server address from the list below, pick a deck and press <b>Ready</b>.</p>
+      <div class="row" style="flex-wrap:wrap">
+        <button id="browserBtn">Play in browser</button>
+        <button id="browserStop" class="secondary" hidden>End session</button>
+        <span class="small muted" id="browserState"></span>
+      </div>
+      <div class="msg" id="browserMsg"></div>
+    </section>
+
     <section id="play" hidden>
       <h2>Play ranked</h2>
       <ol class="small">
@@ -235,6 +247,43 @@ $("armBtn").onclick = async () => {
   catch (e) { $("playMsg").textContent = e.message; }
 };
 
+async function renderBrowser(me) {
+  let st;
+  try { st = await api("/api/stream"); } catch { $("browser").hidden = true; return; }
+  $("browser").hidden = !st.enabled || !me.username;
+  if ($("browser").hidden) return;
+  $("browserStop").hidden = !st.session;
+  $("browserBtn").disabled = !st.allowed || (!st.session && st.free === 0);
+  $("browserBtn").textContent = st.session ? "Open my session" : "Play in browser";
+  if (!st.allowed) {
+    $("browserState").textContent = "Browser play is invite-only during testing.";
+  } else if (st.session) {
+    const mins = Math.max(0, Math.round((st.session.expiresAt * 1000 - Date.now()) / 60000));
+    $("browserState").innerHTML = `<span class="ok">Session active</span>, ${mins} min left`;
+  } else {
+    $("browserState").textContent = `${st.free} of ${st.slots} seats free`;
+  }
+}
+
+$("browserBtn").onclick = async () => {
+  $("browserMsg").textContent = "";
+  // Open the tab inside the click so pop-up blockers allow it, then point it at the session.
+  const tab = window.open("about:blank", "_blank");
+  try {
+    const s = await api("/api/stream/start", { method: "POST" });
+    if (tab) tab.location.href = s.url; else location.href = s.url;
+    render();
+  } catch (e) {
+    if (tab) tab.close();
+    $("browserMsg").textContent = e.message;
+  }
+};
+
+$("browserStop").onclick = async () => {
+  try { await api("/api/stream/stop", { method: "POST" }); } catch {}
+  render();
+};
+
 async function claim(id) {
   $("rewardMsg").textContent = "";
   try { await api(`/api/rewards/${id}/claim`, { method: "POST" }); render(); }
@@ -259,7 +308,7 @@ async function render() {
 
   const signedIn = !!token;
   $("connectBtn").textContent = signedIn ? "Sign out" : "Connect wallet";
-  for (const id of ["profile", "play", "rewards"]) $(id).hidden = !signedIn;
+  for (const id of ["profile", "play", "rewards", "browser"]) $(id).hidden = !signedIn;
   $("walletLabel").textContent = "";
   if (!signedIn) return;
 
@@ -277,6 +326,8 @@ async function render() {
   $("aGames").textContent = a.games; $("aStreak").textContent = a.bestStreak;
   $("aiLeft").textContent = `${me.aiRankedLeftToday} ranked left today`;
   $("playName").textContent = me.username || "";
+
+  await renderBrowser(me);
 
   if (me.arm) {
     const mins = Math.max(0, Math.round((me.arm.expiresAt * 1000 - Date.now()) / 60000));

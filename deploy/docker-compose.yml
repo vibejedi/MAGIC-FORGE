@@ -1,12 +1,27 @@
 # Everything runs with host networking so the Forge servers see players' real IP addresses
 # (the login check compares them with the IP that pressed "Play ranked" on the website).
 x-forge: &forge
-  build: ../forge-server
+  build:
+    context: ../forge-server
+    target: server
   image: ranked-forge-server
   network_mode: host
   restart: always          # each server exits after a match and comes back with a fresh lobby
   env_file: .env
   depends_on: [rewards]
+
+x-stream: &stream
+  build:
+    context: ../forge-server
+    target: stream
+  image: ranked-forge-stream
+  restart: unless-stopped
+  # No .env here: seats only get their slot number and the stream secret, never the
+  # game-server secret or payout keys.
+  cap_drop: [ALL]
+  cap_add: [SETUID, SETGID, KILL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 2g
 
 services:
   rewards:
@@ -46,8 +61,11 @@ services:
       REWARDS_URL: http://127.0.0.1:8080
     volumes: [forge-1:/root/.forge]
 
+  # Second PvP server. Off by default to save ~1.5 GB RAM; enable it by adding "pvp2" to
+  # COMPOSE_PROFILES in .env (e.g. COMPOSE_PROFILES=pvp2).
   forge-2:
     <<: *forge
+    profiles: ["pvp2"]
     environment:
       FORGE_SERVER_ID: ranked-2
       FORGE_PORT: "36744"
@@ -67,9 +85,36 @@ services:
       REWARDS_URL: http://127.0.0.1:8080
     volumes: [forge-ai-1:/root/.forge]
 
+  # Browser play: each seat runs the Forge desktop app for one player at a time and streams it
+  # through noVNC. Seats sit on a private network with fixed addresses (the login check uses
+  # them), publish only to localhost, and are reached through the rewards service, which checks
+  # the player's session cookie. Each seat needs ~1.5-2 GB RAM. Keep STREAM_SLOTS in .env equal
+  # to the number of seats defined here.
+  stream-1:
+    <<: *stream
+    networks: { stream: { ipv4_address: 172.30.0.11 } }
+    ports: ["127.0.0.1:6081:6080"]
+    environment: { SLOT: "1", REWARDS_URL: "https://${DOMAIN}", STREAM_SECRET: "${STREAM_SECRET}" }
+    volumes: [stream-1-cache:/home/player/.cache/forge]
+
+  stream-2:
+    <<: *stream
+    networks: { stream: { ipv4_address: 172.30.0.12 } }
+    ports: ["127.0.0.1:6082:6080"]
+    environment: { SLOT: "2", REWARDS_URL: "https://${DOMAIN}", STREAM_SECRET: "${STREAM_SECRET}" }
+    volumes: [stream-2-cache:/home/player/.cache/forge]
+
+networks:
+  stream:
+    driver: bridge
+    ipam:
+      config: [{ subnet: 172.30.0.0/24 }]
+
 volumes:
   rewards-data:
   caddy-data:
   forge-1:
   forge-2:
   forge-ai-1:
+  stream-1-cache:
+  stream-2-cache:

@@ -85,11 +85,30 @@ else
       .env.example > .env
   chmod 600 .env
 fi
-# Which compose profile runs: the bundled Caddy only when there is no web server already.
-sed -i '/^COMPOSE_PROFILES=/d' .env
-if [ "$SYSTEM_CADDY" = "0" ] && [ "${SKIP_WEB:-0}" != "1" ]; then
-  echo "COMPOSE_PROFILES=bundled-caddy" >> .env
+# Add settings introduced by newer versions, and generate any secret that is still empty.
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; esac
+  key="${line%%=*}"
+  grep -q "^${key}=" .env || echo "$line" >> .env
+done < .env.example
+for key in GAME_SERVER_SECRET ADMIN_TOKEN STREAM_SECRET; do
+  if grep -qE "^${key}=$" .env; then
+    sed -i "s#^${key}=\$#${key}=$(openssl rand -hex 32)#" .env
+  fi
+done
+if grep -qE '^STREAM_ALLOWED_USERS=$' .env && [ -t 0 ]; then
+  read -rp "Usernames allowed to play in the browser (comma-separated, * for everyone, Enter for nobody): " STREAM_USERS
+  [ -n "$STREAM_USERS" ] && sed -i "s#^STREAM_ALLOWED_USERS=\$#STREAM_ALLOWED_USERS=${STREAM_USERS//#/}#" .env
 fi
+
+# Which compose profile runs: the bundled Caddy only when there is no web server already.
+# Keep any profiles the admin added (e.g. pvp2) and add or remove bundled-caddy as needed.
+PROFILES="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2 | tr ',' '\n' | grep -v '^bundled-caddy$' | grep -v '^$' | paste -sd, - || true)"
+if [ "$SYSTEM_CADDY" = "0" ] && [ "${SKIP_WEB:-0}" != "1" ]; then
+  PROFILES="${PROFILES:+$PROFILES,}bundled-caddy"
+fi
+sed -i '/^COMPOSE_PROFILES=/d' .env
+[ -n "$PROFILES" ] && echo "COMPOSE_PROFILES=$PROFILES" >> .env
 [ -f goals.json ] || cp goals.example.json goals.json
 
 # --- add the site to the system Caddy ---
@@ -128,7 +147,8 @@ docker compose up -d --build
 echo
 echo "Done."
 echo "  Website:        https://$DOMAIN"
-echo "  Forge servers:  $DOMAIN:36743 and $DOMAIN:36744 (PvP), $DOMAIN:36745 (vs AI); ~1 minute to load cards"
+echo "  Forge servers:  $DOMAIN:36743 (PvP), $DOMAIN:36745 (vs AI); ~1 minute to load cards"
+echo "  Browser play:   \"Play in browser\" on the website (users in STREAM_ALLOWED_USERS)"
 echo "  Admin token:    grep ADMIN_TOKEN $(pwd)/.env"
 echo "  Logs:           cd $(pwd) && docker compose logs -f"
 echo "Payouts are in test mode (PAYOUT_MODE=dry-run) until you change deploy/.env."

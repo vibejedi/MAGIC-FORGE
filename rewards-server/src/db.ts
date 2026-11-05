@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS arms (
   expires_at  INTEGER NOT NULL
 );
 
+-- Browser play: which player holds each stream slot. Only a hash of the cookie ticket is stored.
+CREATE TABLE IF NOT EXISTS stream_sessions (
+  slot        INTEGER PRIMARY KEY,
+  account_id  INTEGER NOT NULL UNIQUE REFERENCES accounts(id),
+  ticket_hash TEXT NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS servers (
   id          TEXT PRIMARY KEY,
   address     TEXT NOT NULL,

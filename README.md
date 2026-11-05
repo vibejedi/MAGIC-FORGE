@@ -5,7 +5,7 @@ Ranked 1v1 multiplayer for [Forge](https://github.com/Card-Forge/forge) on a ded
 > **Read [Before launch](#before-launch) first.** The code here works with any card pool. Stock Forge ships Magic: The Gathering card data, and that card data must not be used in a token-rewards launch.
 
 ```
- player's Forge client ──TCP 36743/36744──▶ forge-server (patched Forge, `forge server` mode)
+ player's Forge client ──TCP 36743 (PvP) / 36745 (vs AI)──▶ forge-server (patched Forge, `forge server` mode)
         │                                         │  login check / heartbeat / match result
         │                                         │  (HMAC-signed, localhost)
         └── browser ──HTTPS──▶ Caddy ──▶ rewards-server (Node + SQLite)
@@ -36,6 +36,15 @@ Ranked 1v1 multiplayer for [Forge](https://github.com/Card-Forge/forge) on a ded
 
 The `forge-ai-1` server (port 36745) seats one player against the Forge AI, which plays a random legal preconstructed deck. Join it alone, press Ready, and the match starts. AI games have their own rating and leaderboard (rating moves against a fixed `AI_RATING`), and goals with `"ladder": "ai"` in `goals.json` count only AI games. Only the first `MAX_AI_RANKED_PER_DAY` ranked AI games per player per 24h count, because a deck that reliably beats the AI could otherwise farm rewards; keep AI rewards smaller than PvP ones.
 
+### Browser play (streamed Forge)
+
+Forge is a Java desktop app and can't run in a browser, so browser play streams it: each "seat" (`stream-1`, `stream-2` in `docker-compose.yml`) is a container running the Forge desktop app on a virtual screen, shown in the browser through noVNC. A signed-in player presses **Play in browser**, gets a free seat for `STREAM_SESSION_MINUTES`, and Forge starts with their player name and a fresh profile. The seat's fixed address is armed for ranked play, so they can join the game servers straight away.
+
+- Only usernames in `STREAM_ALLOWED_USERS` can use it (`*` for everyone, empty for nobody).
+- The stream is reached only through the rewards service, which checks an HttpOnly session cookie; seats publish to localhost only. When a session ends or is renewed, open viewers are disconnected before the seat can be reused.
+- Seats don't get the game-server secret or payout keys; Forge runs as an unprivileged user without the launcher's environment, with all Linux capabilities dropped except what the launcher needs to switch to that user.
+- Each seat uses ~1.5-2 GB RAM and serves one player at a time. It's a demo: fine on a desktop browser, awkward on phones.
+
 ### Anti-abuse rules (all in `.env`)
 
 - A game counts as ranked only if it lasts at least `MIN_TURNS_FOR_RANKED` turns. Exception: a game where someone left.
@@ -50,7 +59,7 @@ What these rules don't stop: one person running two wallets from two networks an
 
 ## Deploying on a VPS (e.g. Contabo)
 
-Needs Ubuntu 22.04/24.04 and roughly 2 GB RAM per Forge server plus 1 GB. The Compose file runs two servers.
+Needs Ubuntu 22.04/24.04 and roughly 2 GB RAM for each Forge process plus 1 GB. By default Compose runs one PvP server, one vs-AI server and two browser-play seats (four Forge processes, ~7 GB); a second PvP server (`forge-2`, port 36744) is available by adding `pvp2` to `COMPOSE_PROFILES` in `deploy/.env`.
 
 1. Point a domain at the VPS with an **A record only** (no AAAA). The IP check compares the address the website sees with the one Forge sees, and mixing IPv6 and IPv4 would make them differ.
 2. On the VPS, as root:
@@ -76,7 +85,7 @@ Needs Ubuntu 22.04/24.04 and roughly 2 GB RAM per Forge server plus 1 GB. The Co
    docker compose logs -f forge-1 rewards
    ```
 
-To add a server, copy the `forge-2` block in `docker-compose.yml` with the next port, and open that port in `ufw`.
+To add more servers or seats, copy a `forge-*` or `stream-*` block in `docker-compose.yml` with the next port (and, for seats, the next address and `STREAM_SLOTS` in `.env`), and open game ports in `ufw`.
 
 ### Players' Forge version
 
