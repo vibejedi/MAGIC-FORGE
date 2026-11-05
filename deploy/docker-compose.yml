@@ -24,8 +24,11 @@ services:
       - rewards-data:/data
       - ./goals.json:/config/goals.json:ro
 
+  # Only used when the server has no web server of its own (install.sh decides; see
+  # COMPOSE_PROFILES in .env). Otherwise the site is added to the system Caddy instead.
   caddy:
     image: caddy:2
+    profiles: ["bundled-caddy"]
     network_mode: host
     restart: unless-stopped
     env_file: .env

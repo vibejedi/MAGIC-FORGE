@@ -58,9 +58,9 @@ Needs Ubuntu 22.04/24.04 and roughly 2 GB RAM per Forge server plus 1 GB. The Co
    git clone <this repo> ranked-forge && cd ranked-forge
    ```
    ```bash
-   ./deploy/install.sh play.yourdomain.com
+   ./deploy/install.sh yourdomain.com
    ```
-   This installs Docker, opens ports 22, 80, 443 and 36743-36746 in the firewall, writes `deploy/.env` with fresh secrets, and builds and starts everything. The first build takes several minutes. Each Forge server needs about a minute to load its card data before it accepts players. Re-running it keeps your existing `.env`.
+   If the server already runs Caddy for other sites, the installer adds this site to `/etc/caddy/Caddyfile` (after a backup, reloading only if the config validates) instead of starting its own; it only adds the Forge ports to an active `ufw` and never changes existing rules. Otherwise it installs Docker, sets up the firewall (ports 22, 80, 443, 36743-36746), and runs a bundled Caddy. It also writes `deploy/.env` with fresh secrets, and builds and starts everything. The first build takes several minutes. Each Forge server needs about a minute to load its card data before it accepts players. Re-running it keeps your existing `.env`.
 3. Edit `deploy/goals.json` for your goals and amounts and `deploy/.env` for limits, then apply the changes:
 
    ```bash
