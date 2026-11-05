@@ -507,10 +507,10 @@ index 8f1b018d..b7fa06a5 100644
                  System.out.println("Unknown mode.\nKnown modes are 'sim', 'parse', 'server'");
 diff --git a/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
 new file mode 100644
-index 00000000..296d58bb
+index 00000000..96f9b19b
 --- /dev/null
 +++ b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,70 @@
 +package forge.net;
 +
 +import forge.deck.Deck;
@@ -554,7 +554,16 @@ index 00000000..296d58bb
 +            }
 +            System.out.println("SMOKE: game started, " + args[2] + " concedes");
 +            Thread.sleep(3_000);
-+            concede(a);
++            // concede() can block until the server answers, so don't let it hold up the check
++            final Thread conceder = new Thread(() -> {
++                try {
++                    concede(a);
++                } catch (final Exception e) {
++                    e.printStackTrace();
++                }
++            }, "smoke-concede");
++            conceder.setDaemon(true);
++            conceder.start();
 +            // The scripted clients never press Quit on the result screen, so instead of waiting for
 +            // the match to close, check the result on the rewards service (GET /api/leaderboard).
 +            Thread.sleep(10_000);
