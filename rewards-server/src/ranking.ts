@@ -1,4 +1,4 @@
-import type { Config, Goal } from "./config.js";
+import type { Config, Goal, Ladder } from "./config.js";
 import { toBaseUnits } from "./config.js";
 import { type DB, now, tx } from "./db.js";
 
@@ -16,6 +16,22 @@ export interface MatchReport {
   /** Exactly two Forge player names, which are account usernames. */
   players: { username: string; leaver: boolean }[];
   /** Username of the winner as Forge reported it, or null for a draw. */
+  winner: string | null;
+  turns: number;
+  durationSec: number;
+}
+
+/** Stats key for a ladder: "S1" for PvP, "S1/ai" for games against the AI. */
+export function ladderSeason(cfg: Config, ladder: Ladder): string {
+  return ladder === "ai" ? `${cfg.goals.season}/ai` : cfg.goals.season;
+}
+
+export interface AiMatchReport {
+  matchId: string;
+  serverId: string;
+  username: string;
+  leaver: boolean;
+  /** Winner as Forge reported it: the player's username, the AI's name, or null for a draw. */
   winner: string | null;
   turns: number;
   durationSec: number;
@@ -43,6 +59,15 @@ function getStats(db: DB, accountId: number, season: string): StatsRow {
   return db.prepare(`SELECT * FROM stats WHERE account_id = ? AND season = ?`).get(accountId, season) as unknown as StatsRow;
 }
 
+/** Like getStats, but without creating a row for a ladder the player hasn't played. */
+function peekStats(db: DB, accountId: number, season: string): StatsRow {
+  return (
+    (db.prepare(`SELECT * FROM stats WHERE account_id = ? AND season = ?`).get(accountId, season) as unknown as StatsRow | undefined) ?? {
+      rating: START_RATING, wins: 0, losses: 0, draws: 0, games: 0, streak: 0, best_streak: 0,
+    }
+  );
+}
+
 function putStats(db: DB, accountId: number, season: string, s: StatsRow) {
   db.prepare(
     `UPDATE stats SET rating = ?, wins = ?, losses = ?, draws = ?, games = ?, streak = ?, best_streak = ?
@@ -62,10 +87,13 @@ function metricValue(s: StatsRow, goal: Goal): number {
 /** Grants every goal the account has now reached and has not been granted this season. */
 export function grantGoals(db: DB, cfg: Config, accountId: number): string[] {
   const season = cfg.goals.season;
-  const s = getStats(db, accountId, season);
+  const byLadder = {
+    pvp: peekStats(db, accountId, ladderSeason(cfg, "pvp")),
+    ai: peekStats(db, accountId, ladderSeason(cfg, "ai")),
+  };
   const granted: string[] = [];
   for (const goal of cfg.goals.goals) {
-    if (metricValue(s, goal) < goal.target) continue;
+    if (metricValue(byLadder[goal.ladder ?? "pvp"], goal) < goal.target) continue;
     const res = db
       .prepare(
         `INSERT OR IGNORE INTO rewards (account_id, season, goal_id, amount, status, earned_at)
@@ -150,24 +178,79 @@ export function recordMatch(db: DB, cfg: Config, r: MatchReport): MatchResult {
     const d = eloDelta(sa.rating, sb.rating, scoreA);
     sa.rating += d;
     sb.rating -= d;
-    for (const [s, score] of [[sa, scoreA], [sb, (1 - scoreA) as 0 | 0.5 | 1]] as const) {
-      s.games += 1;
-      if (score === 1) {
-        s.wins += 1;
-        s.streak += 1;
-        s.best_streak = Math.max(s.best_streak, s.streak);
-      } else if (score === 0) {
-        s.losses += 1;
-        s.streak = 0;
-      } else {
-        s.draws += 1;
-      }
-    }
+    applyScore(sa, scoreA);
+    applyScore(sb, (1 - scoreA) as 0 | 0.5 | 1);
     putStats(db, a, season, sa);
     putStats(db, b, season, sb);
     grantGoals(db, cfg, a);
     grantGoals(db, cfg, b);
     return { status: "recorded", ranked: true, winnerId };
+  });
+}
+
+function applyScore(s: StatsRow, score: 0 | 0.5 | 1) {
+  s.games += 1;
+  if (score === 1) {
+    s.wins += 1;
+    s.streak += 1;
+    s.best_streak = Math.max(s.best_streak, s.streak);
+  } else if (score === 0) {
+    s.losses += 1;
+    s.streak = 0;
+  } else {
+    s.draws += 1;
+  }
+}
+
+/**
+ * Records a game against the AI. Ranked only for registered players, games of at least
+ * MIN_TURNS_FOR_RANKED turns (unless the player left, which is a loss), and the first
+ * MAX_AI_RANKED_PER_DAY ranked AI games per player per 24h. Rating moves against a fixed
+ * AI_RATING; the AI ladder is separate from the PvP ladder.
+ */
+export function recordAiMatch(db: DB, cfg: Config, r: AiMatchReport): MatchResult {
+  const season = ladderSeason(cfg, "ai");
+  return tx(db, () => {
+    if (db.prepare(`SELECT 1 FROM ai_matches WHERE id = ?`).get(r.matchId)) return { status: "duplicate", ranked: false };
+    const acct = db.prepare(`SELECT id, banned FROM accounts WHERE username = ?`).get(r.username) as
+      | { id: number; banned: number }
+      | undefined;
+    if (!acct || acct.banned) return { status: "recorded", ranked: false, note: "unregistered or banned player" };
+
+    const score: 0 | 0.5 | 1 = r.leaver
+      ? 0
+      : r.winner === null
+        ? 0.5
+        : r.winner.toLowerCase() === r.username.toLowerCase()
+          ? 1
+          : 0;
+
+    let ranked = true;
+    let note: string | undefined;
+    if (r.turns < cfg.minTurnsForRanked && !r.leaver) {
+      ranked = false;
+      note = `fewer than ${cfg.minTurnsForRanked} turns`;
+    } else {
+      const today = db
+        .prepare(`SELECT COUNT(*) AS n FROM ai_matches WHERE account_id = ? AND ranked = 1 AND created_at > ?`)
+        .get(acct.id, now() - 86400) as { n: number };
+      if (today.n >= cfg.maxAiRankedPerDay) {
+        ranked = false;
+        note = `daily limit of ${cfg.maxAiRankedPerDay} ranked AI games reached`;
+      }
+    }
+    db.prepare(
+      `INSERT INTO ai_matches (id, server_id, season, account_id, won, turns, duration_sec, ranked, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(r.matchId, r.serverId, season, acct.id, score === 0.5 ? null : score, r.turns, r.durationSec, ranked ? 1 : 0, note ?? null, now());
+    if (!ranked) return { status: "recorded", ranked: false, note };
+
+    const s = getStats(db, acct.id, season);
+    s.rating += eloDelta(s.rating, cfg.aiRating, score);
+    applyScore(s, score);
+    putStats(db, acct.id, season, s);
+    grantGoals(db, cfg, acct.id);
+    return { status: "recorded", ranked: true, winnerId: score === 1 ? acct.id : null };
   });
 }
 

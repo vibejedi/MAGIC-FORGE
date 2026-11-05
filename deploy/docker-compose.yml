@@ -55,8 +55,21 @@ services:
       REWARDS_URL: http://127.0.0.1:8080
     volumes: [forge-2:/root/.forge]
 
+  # One player against the Forge AI (random preconstructed deck). Add more by copying this
+  # block with the next port; each server holds one match at a time and uses ~1.5 GB RAM.
+  forge-ai-1:
+    <<: *forge
+    environment:
+      FORGE_SERVER_ID: vs-ai-1
+      FORGE_MODE: ai
+      FORGE_PORT: "36745"
+      FORGE_PUBLIC_ADDRESS: ${PUBLIC_HOST}:36745
+      REWARDS_URL: http://127.0.0.1:8080
+    volumes: [forge-ai-1:/root/.forge]
+
 volumes:
   rewards-data:
   caddy-data:
   forge-1:
   forge-2:
+  forge-ai-1:

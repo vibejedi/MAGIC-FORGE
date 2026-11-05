@@ -46,6 +46,11 @@
   .bar i { display: block; height: 100%; background: var(--accent); }
   ol { padding-left: 20px; margin: 8px 0; }
   .table-wrap { overflow-x: auto; }
+  .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; margin-bottom: 10px; }
+  .tabs button { background: transparent; color: var(--muted); border-radius: 0; padding: 6px 12px; font-weight: 600; }
+  .tabs button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  .ladder { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 4px 0 6px; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); margin-left: 6px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -69,11 +74,19 @@
         <div class="row"><input id="nameInput" maxlength="20" placeholder="3-20 letters, digits, _"><button id="nameBtn">Save</button></div>
       </div>
       <div id="hasName" hidden>
+        <div class="ladder">vs players</div>
         <div class="stats">
           <div class="stat"><b id="sRating">–</b><span>Rating</span></div>
           <div class="stat"><b id="sWins">–</b><span>Wins</span></div>
           <div class="stat"><b id="sGames">–</b><span>Games</span></div>
           <div class="stat"><b id="sStreak">–</b><span>Best streak</span></div>
+        </div>
+        <div class="ladder">vs AI <span class="tag" id="aiLeft"></span></div>
+        <div class="stats">
+          <div class="stat"><b id="aRating">–</b><span>Rating</span></div>
+          <div class="stat"><b id="aWins">–</b><span>Wins</span></div>
+          <div class="stat"><b id="aGames">–</b><span>Games</span></div>
+          <div class="stat"><b id="aStreak">–</b><span>Best streak</span></div>
         </div>
       </div>
       <div class="msg" id="profileMsg"></div>
@@ -84,12 +97,12 @@
       <ol class="small">
         <li>Set your Forge player name to <code id="playName"></code>.</li>
         <li>Press <b>Play ranked</b> below. Use the same network you'll play from.</li>
-        <li>In Forge choose <b>Online Multiplayer → Join</b> and enter a server address.</li>
-        <li>Choose a deck and press Ready. The match starts when both players are ready.</li>
+        <li>In Forge choose <b>Online Multiplayer → Join</b> and enter a server address: a <b>PvP</b> server to play another player, or a <b>vs AI</b> server to play the computer.</li>
+        <li>Choose a deck and press Ready. The match starts when everyone is ready.</li>
       </ol>
       <div class="row"><button id="armBtn">Play ranked</button><span class="small muted" id="armState"></span></div>
       <div class="table-wrap" style="margin-top:12px">
-        <table><thead><tr><th>Server</th><th>Address</th><th>Status</th></tr></thead><tbody id="servers"></tbody></table>
+        <table><thead><tr><th>Server</th><th>Mode</th><th>Address</th><th>Status</th></tr></thead><tbody id="servers"></tbody></table>
       </div>
       <div class="msg" id="playMsg"></div>
     </section>
@@ -105,6 +118,10 @@
 
     <section class="wide">
       <h2>Leaderboard</h2>
+      <div class="tabs" role="group" aria-label="Ladder">
+        <button type="button" data-ladder="pvp" aria-pressed="true">vs players</button>
+        <button type="button" data-ladder="ai" aria-pressed="false">vs AI</button>
+      </div>
       <div class="table-wrap">
         <table><thead><tr><th>#</th><th>Player</th><th class="num">Rating</th><th class="num">W</th><th class="num">L</th><th class="num">D</th></tr></thead><tbody id="board"></tbody></table>
       </div>
@@ -138,6 +155,15 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&
 let token = null;
 try { token = localStorage.getItem("rf_token"); } catch {}
 let config = null;
+let ladder = "pvp";
+try { if (localStorage.getItem("rf_ladder") === "ai") ladder = "ai"; } catch {}
+document.querySelectorAll(".tabs button").forEach((b) => {
+  b.onclick = () => {
+    ladder = b.dataset.ladder;
+    try { localStorage.setItem("rf_ladder", ladder); } catch {}
+    render();
+  };
+});
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -225,7 +251,8 @@ async function render() {
   config = config || await api("/api/config");
   $("season").textContent = `Season ${config.season} · rewards in ${config.token}` + (config.payoutMode === "dry-run" ? " · test mode, no real payouts" : "");
 
-  const board = await api("/api/leaderboard");
+  document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.ladder === ladder)));
+  const board = await api(`/api/leaderboard?ladder=${ladder}`);
   $("board").innerHTML = board.rows.map((r, i) =>
     `<tr><td>${i + 1}</td><td>${esc(r.username)}</td><td class="num">${r.rating}</td><td class="num">${r.wins}</td><td class="num">${r.losses}</td><td class="num">${r.draws}</td></tr>`
   ).join("") || `<tr><td colspan="6" class="muted">No ranked games yet.</td></tr>`;
@@ -245,6 +272,10 @@ async function render() {
   const s = me.stats || { rating: 1200, wins: 0, games: 0, bestStreak: 0 };
   $("sRating").textContent = s.rating; $("sWins").textContent = s.wins;
   $("sGames").textContent = s.games; $("sStreak").textContent = s.bestStreak;
+  const a = me.aiStats || { rating: 1200, wins: 0, games: 0, bestStreak: 0 };
+  $("aRating").textContent = a.rating; $("aWins").textContent = a.wins;
+  $("aGames").textContent = a.games; $("aStreak").textContent = a.bestStreak;
+  $("aiLeft").textContent = `${me.aiRankedLeftToday} ranked left today`;
   $("playName").textContent = me.username || "";
 
   if (me.arm) {
@@ -255,19 +286,22 @@ async function render() {
   }
   const servers = await api("/api/servers");
   $("servers").innerHTML = servers.map((sv) =>
-    `<tr><td>${esc(sv.id)}</td><td><code>${esc(sv.address)}</code></td><td>${esc(sv.status)}${sv.players.length ? " · " + sv.players.map(esc).join(", ") : ""}</td></tr>`
-  ).join("") || `<tr><td colspan="3" class="muted">No servers online.</td></tr>`;
+    `<tr><td>${esc(sv.id)}</td><td>${sv.mode === "ai" ? "vs AI" : "PvP"}</td><td><code>${esc(sv.address)}</code></td><td>${esc(sv.status)}${sv.players.length ? " · " + sv.players.map(esc).join(", ") : ""}</td></tr>`
+  ).join("") || `<tr><td colspan="4" class="muted">No servers online.</td></tr>`;
 
   const byGoal = Object.fromEntries(me.rewards.filter((r) => r.season === config.season).map((r) => [r.goalId, r]));
-  const metric = { wins: s.wins, games: s.games, rating: s.rating, bestStreak: s.bestStreak };
+  const metrics = {
+    pvp: { wins: s.wins, games: s.games, rating: s.rating, bestStreak: s.bestStreak },
+    ai: { wins: a.wins, games: a.games, rating: a.rating, bestStreak: a.bestStreak },
+  };
   $("goals").innerHTML = config.goals.map((g) => {
     const r = byGoal[g.id];
-    const v = metric[g.metric] ?? 0;
+    const v = metrics[g.ladder === "ai" ? "ai" : "pvp"][g.metric] ?? 0;
     const pct = Math.min(100, Math.round((v / g.target) * 100));
     const status = r
       ? (r.status === "available" ? `<button onclick="claim(${r.id})">Claim</button>` : esc(STATUS[r.status] || r.status))
       : `<span class="muted">${v} / ${g.target}</span>`;
-    return `<tr><td>${esc(g.title)}</td><td style="min-width:120px"><div class="bar"><i style="width:${pct}%"></i></div></td>
+    return `<tr><td>${esc(g.title)}${g.ladder === "ai" ? '<span class="tag">vs AI</span>' : ""}</td><td style="min-width:120px"><div class="bar"><i style="width:${pct}%"></i></div></td>
             <td class="num">${esc(g.reward)} ${esc(config.token)}</td><td>${status}</td></tr>`;
   }).join("");
   $("claimNote").textContent = config.claimMode === "manual"

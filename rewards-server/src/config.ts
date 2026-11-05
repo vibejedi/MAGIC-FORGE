@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 
 export type Metric = "wins" | "games" | "rating" | "bestStreak";
+export type Ladder = "pvp" | "ai";
 
 export interface Goal {
   id: string;
   title: string;
   metric: Metric;
+  /** Which ladder's stats the goal counts: player-vs-player (default) or vs the AI. */
+  ladder?: Ladder;
   target: number;
   /** Whole-token amount as a decimal string, e.g. "12.5". */
   reward: string;
@@ -27,6 +30,8 @@ export interface Config {
   adminToken: string;
   minTurnsForRanked: number;
   maxRankedPerPairPerDay: number;
+  maxAiRankedPerDay: number;
+  aiRating: number;
   armTtlMinutes: number;
   minAccountAgeHoursToClaim: number;
   claimMode: "manual" | "auto";
@@ -52,6 +57,7 @@ export function validateGoals(file: GoalsFile): GoalsFile {
     if (!g.id || seen.has(g.id)) throw new Error(`goals file: missing or duplicate id '${g.id}'`);
     seen.add(g.id);
     if (!METRICS.includes(g.metric)) throw new Error(`goal ${g.id}: unknown metric '${g.metric}'`);
+    if (g.ladder !== undefined && g.ladder !== "pvp" && g.ladder !== "ai") throw new Error(`goal ${g.id}: ladder must be pvp or ai`);
     if (!Number.isFinite(g.target) || g.target <= 0) throw new Error(`goal ${g.id}: bad target`);
     if (!/^\d+(\.\d+)?$/.test(g.reward)) throw new Error(`goal ${g.id}: reward must be a decimal string`);
   }
@@ -92,6 +98,8 @@ export function loadConfig(): Config {
     adminToken: env("ADMIN_TOKEN"),
     minTurnsForRanked: int("MIN_TURNS_FOR_RANKED", 4),
     maxRankedPerPairPerDay: int("MAX_RANKED_PER_PAIR_PER_DAY", 2),
+    maxAiRankedPerDay: int("MAX_AI_RANKED_PER_DAY", 5),
+    aiRating: int("AI_RATING", 1400),
     armTtlMinutes: int("ARM_TTL_MINUTES", 15),
     minAccountAgeHoursToClaim: int("MIN_ACCOUNT_AGE_HOURS_TO_CLAIM", 24),
     claimMode,

@@ -1,12 +1,15 @@
 {
   "season": "S1",
   "goals": [
-    { "id": "first-win",   "title": "First ranked win",        "metric": "wins",      "target": 1,    "reward": "10" },
-    { "id": "wins-10",     "title": "10 ranked wins",          "metric": "wins",      "target": 10,   "reward": "50" },
-    { "id": "wins-50",     "title": "50 ranked wins",          "metric": "wins",      "target": 50,   "reward": "250" },
-    { "id": "games-25",    "title": "Play 25 ranked games",    "metric": "games",     "target": 25,   "reward": "25" },
-    { "id": "streak-5",    "title": "5-win streak",            "metric": "bestStreak","target": 5,    "reward": "75" },
-    { "id": "rating-1400", "title": "Reach 1400 rating",       "metric": "rating",    "target": 1400, "reward": "100" },
-    { "id": "rating-1600", "title": "Reach 1600 rating",       "metric": "rating",    "target": 1600, "reward": "300" }
+    {"id": "first-win", "title": "First ranked win", "metric": "wins", "target": 1, "reward": "10"},
+    {"id": "wins-10", "title": "10 ranked wins", "metric": "wins", "target": 10, "reward": "50"},
+    {"id": "wins-50", "title": "50 ranked wins", "metric": "wins", "target": 50, "reward": "250"},
+    {"id": "games-25", "title": "Play 25 ranked games", "metric": "games", "target": 25, "reward": "25"},
+    {"id": "streak-5", "title": "5-win streak", "metric": "bestStreak", "target": 5, "reward": "75"},
+    {"id": "rating-1400", "title": "Reach 1400 rating", "metric": "rating", "target": 1400, "reward": "100"},
+    {"id": "rating-1600", "title": "Reach 1600 rating", "metric": "rating", "target": 1600, "reward": "300"},
+    {"id": "ai-first-win", "title": "First win vs AI", "ladder": "ai", "metric": "wins", "target": 1, "reward": "2"},
+    {"id": "ai-wins-10", "title": "10 wins vs AI", "ladder": "ai", "metric": "wins", "target": 10, "reward": "10"},
+    {"id": "ai-rating-1500", "title": "Reach 1500 vs AI", "ladder": "ai", "metric": "rating", "target": 1500, "reward": "20"}
   ]
 }

@@ -32,6 +32,10 @@ Ranked 1v1 multiplayer for [Forge](https://github.com/Card-Forge/forge) on a ded
 6. When the game ends, the **server** reports the winner, turn count and anyone who disconnected. Players never report results, so a modified client can't fake a win.
 7. The server restarts with an empty lobby once both players leave the result screen, or after 2 minutes.
 
+### Ranked vs AI
+
+The `forge-ai-1` server (port 36745) seats one player against the Forge AI, which plays a random legal preconstructed deck. Join it alone, press Ready, and the match starts. AI games have their own rating and leaderboard (rating moves against a fixed `AI_RATING`), and goals with `"ladder": "ai"` in `goals.json` count only AI games. Only the first `MAX_AI_RANKED_PER_DAY` ranked AI games per player per 24h count, because a deck that reliably beats the AI could otherwise farm rewards; keep AI rewards smaller than PvP ones.
+
 ### Anti-abuse rules (all in `.env`)
 
 - A game counts as ranked only if it lasts at least `MIN_TURNS_FOR_RANKED` turns. Exception: a game where someone left.

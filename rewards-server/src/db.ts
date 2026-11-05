@@ -59,6 +59,22 @@ CREATE TABLE IF NOT EXISTS matches (
 );
 CREATE INDEX IF NOT EXISTS matches_pair ON matches(player_a, player_b, created_at);
 
+-- Ranked games against the Forge AI (one human player).
+CREATE TABLE IF NOT EXISTS ai_matches (
+  id           TEXT PRIMARY KEY,
+  server_id    TEXT NOT NULL,
+  season       TEXT NOT NULL,
+  account_id   INTEGER NOT NULL REFERENCES accounts(id),
+  won          INTEGER,
+  turns        INTEGER NOT NULL,
+  duration_sec INTEGER NOT NULL,
+  ranked       INTEGER NOT NULL,
+  note         TEXT,
+  created_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_matches_account ON ai_matches(account_id, created_at);
+
+-- season is "S1" for the player-vs-player ladder and "S1/ai" for the vs-AI ladder.
 CREATE TABLE IF NOT EXISTS stats (
   account_id  INTEGER NOT NULL REFERENCES accounts(id),
   season      TEXT NOT NULL,
@@ -97,7 +113,19 @@ export function openDb(path: string): DB {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Columns added after the first release; ALTER fails harmlessly when the column exists. */
+function migrate(db: DB) {
+  for (const sql of [`ALTER TABLE servers ADD COLUMN mode TEXT NOT NULL DEFAULT 'pvp'`]) {
+    try {
+      db.exec(sql);
+    } catch (e) {
+      if (!/duplicate column/i.test(String(e))) throw e;
+    }
+  }
 }
 
 /** Run fn inside a transaction; node:sqlite is synchronous so this is safe on one connection. */

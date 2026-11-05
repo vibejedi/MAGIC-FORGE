@@ -1,11 +1,14 @@
 diff --git a/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java b/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java
 new file mode 100644
-index 00000000..91ae3140
+index 00000000..e97bd1d8
 --- /dev/null
 +++ b/forge-gui-desktop/src/main/java/forge/server/DedicatedServer.java
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,333 @@
 +package forge.server;
 +
++import forge.deck.Deck;
++import forge.deck.DeckFormat;
++import forge.deck.io.DeckSerializer;
 +import forge.game.GameOutcome;
 +import forge.game.Match;
 +import forge.gamemodes.match.GameLobby.GameLobbyData;
@@ -26,10 +29,13 @@ index 00000000..91ae3140
 +import forge.localinstance.properties.ForgePreferences.FPref;
 +import forge.model.FModel;
 +
++import java.io.File;
 +import java.net.InetSocketAddress;
 +import java.net.SocketAddress;
 +import java.nio.file.Path;
 +import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collections;
 +import java.util.LinkedHashMap;
 +import java.util.List;
 +import java.util.Map;
@@ -51,6 +57,8 @@ index 00000000..91ae3140
 + *   <li>REWARDS_URL: base URL of the rewards service (required)</li>
 + *   <li>GAME_SERVER_SECRET: shared HMAC secret (required)</li>
 + *   <li>FORGE_MAX_MATCH_MINUTES: abandon a match that runs longer (default 90)</li>
++ *   <li>FORGE_MODE: "pvp" (default, two players) or "ai" (one player against the Forge AI,
++ *       which plays a random legal preconstructed deck)</li>
 + *   <li>FORGE_RANKED_LOGIN_GATE: set to "off" only for local testing without the rewards service</li>
 + * </ul>
 + */
@@ -63,6 +71,11 @@ index 00000000..91ae3140
 +    private final int port = Integer.parseInt(env("FORGE_PORT", "36743"));
 +    private final long maxMatchMillis = TimeUnit.MINUTES.toMillis(Long.parseLong(env("FORGE_MAX_MATCH_MINUTES", "90")));
 +    private final boolean gateEnabled = !"off".equalsIgnoreCase(env("FORGE_RANKED_LOGIN_GATE", "on"));
++    private final boolean aiMode = "ai".equalsIgnoreCase(env("FORGE_MODE", "pvp"));
++
++    /** Name of the AI seat. Contains a space, so it can never collide with an account username. */
++    static final String AI_NAME = "Forge AI";
++    private static final int AI_SLOT = 1;
 +
 +    private final ScheduledExecutorService loop = Executors.newSingleThreadScheduledExecutor(r -> {
 +        final Thread t = new Thread(r, "dedicated-server");
@@ -109,6 +122,9 @@ index 00000000..91ae3140
 +
 +        server = FServerManager.getInstance();
 +        lobby = new ServerGameLobby();
++        if (aiMode) {
++            seatAi();
++        }
 +        server.startServer(port);
 +        server.setLobby(lobby);
 +        lobby.setListener(new IUpdateable() {
@@ -124,7 +140,8 @@ index 00000000..91ae3140
 +            @Override public ClientGameLobby getLobby() { return null; }
 +        });
 +
-+        System.out.printf("Dedicated server %s listening on %d (players connect to %s)%n", serverId, port, publicAddress);
++        System.out.printf("Dedicated server %s (%s) listening on %d (players connect to %s)%n",
++                serverId, aiMode ? "vs AI" : "PvP", port, publicAddress);
 +        loop.scheduleWithFixedDelay(this::tick, 1, 1, TimeUnit.SECONDS);
 +    }
 +
@@ -171,7 +188,8 @@ index 00000000..91ae3140
 +
 +    private void maybeStartMatch() {
 +        final List<LobbySlot> seats = remoteSlots();
-+        if (seats.size() < 2 || !seats.stream().allMatch(LobbySlot::isReady)) {
++        final int needed = aiMode ? 1 : 2;
++        if (seats.size() < needed || !seats.stream().allMatch(LobbySlot::isReady)) {
 +            startRefusedNotified = false;
 +            return;
 +        }
@@ -179,8 +197,9 @@ index 00000000..91ae3140
 +        if (start == null) {
 +            if (!startRefusedNotified) {
 +                startRefusedNotified = true;
-+                server.broadcast(MessageEvent.warning(
-+                        "Match could not start: both players need a legal Constructed deck. Fix your deck and press Ready again."));
++                server.broadcast(MessageEvent.warning(aiMode
++                        ? "Match could not start: you need a legal Constructed deck (60+ cards, max 4 copies). Fix it and press Ready again."
++                        : "Match could not start: both players need a legal Constructed deck. Fix your deck and press Ready again."));
 +                for (final LobbySlot s : seats) {
 +                    s.setIsReady(false);
 +                }
@@ -194,7 +213,8 @@ index 00000000..91ae3140
 +        DedicatedHooks.leavers.clear();
 +        System.out.printf("[match %s] starting: %s%n", matchId, seatedPlayers);
 +        start.run();
-+        server.broadcast(new MessageEvent("Ranked match " + matchId.substring(0, 8) + " started. Good luck!"));
++        server.broadcast(new MessageEvent((aiMode ? "Ranked match vs AI " : "Ranked match ")
++                + matchId.substring(0, 8) + " started. Good luck!"));
 +    }
 +
 +    private void watchMatch(final HostedMatch hosted) {
@@ -212,7 +232,9 @@ index 00000000..91ae3140
 +                    matchId, TimeUnit.MILLISECONDS.toMinutes(maxMatchMillis));
 +            server.broadcast(MessageEvent.warning("Match time limit reached. This match does not count."));
 +        }
-+        server.broadcast(new MessageEvent("This server restarts for the next match once both players leave the result screen."));
++        server.broadcast(new MessageEvent(aiMode
++                ? "This server restarts for the next match once you leave the result screen."
++                : "This server restarts for the next match once both players leave the result screen."));
 +        final long deadline = System.currentTimeMillis() + EXIT_GRACE_SECONDS * 1000L;
 +        loop.scheduleWithFixedDelay(() -> {
 +            // Players leave by quitting from the result screen (the match closes) or disconnecting
@@ -248,6 +270,7 @@ index 00000000..91ae3140
 +        final Map<String, Object> body = new LinkedHashMap<>();
 +        body.put("matchId", matchId);
 +        body.put("serverId", serverId);
++        body.put("mode", aiMode ? "ai" : "pvp");
 +        body.put("players", players);
 +        body.put("winner", winner);
 +        body.put("turns", turns);
@@ -264,9 +287,40 @@ index 00000000..91ae3140
 +        final Map<String, Object> body = new LinkedHashMap<>();
 +        body.put("serverId", serverId);
 +        body.put("address", publicAddress);
-+        body.put("status", matchId != null ? "playing" : remoteSlots().size() >= 2 ? "full" : "waiting");
++        body.put("mode", aiMode ? "ai" : "pvp");
++        body.put("status", matchId != null ? "playing" : remoteSlots().size() >= (aiMode ? 1 : 2) ? "full" : "waiting");
 +        body.put("players", remoteSlots().stream().map(LobbySlot::getName).toList());
 +        rewards.heartbeat(body);
++    }
++
++    /** Puts the AI in seat 2 with a random legal preconstructed deck, ready to play. */
++    private void seatAi() {
++        final LobbySlot slot = lobby.getSlot(AI_SLOT);
++        slot.setType(LobbySlotType.AI);
++        slot.setName(AI_NAME);
++        slot.setDeck(randomAiDeck());
++        slot.setIsReady(true);
++    }
++
++    private static Deck randomAiDeck() {
++        final File[] files = new File(ForgeConstants.QUEST_PRECON_DIR).listFiles((d, n) -> n.endsWith(".dck"));
++        if (files == null || files.length == 0) {
++            throw new IllegalStateException("No precon decks in " + ForgeConstants.QUEST_PRECON_DIR);
++        }
++        final List<File> shuffled = new ArrayList<>(Arrays.asList(files));
++        Collections.shuffle(shuffled);
++        for (final File f : shuffled) {
++            try {
++                final Deck deck = DeckSerializer.fromFile(f);
++                if (deck != null && DeckFormat.Constructed.getDeckConformanceProblem(deck) == null) {
++                    System.out.println("[ai] deck: " + deck.getName());
++                    return deck;
++                }
++            } catch (final RuntimeException e) {
++                // unreadable or references unknown cards; try another
++            }
++        }
++        throw new IllegalStateException("No legal Constructed precon deck found");
 +    }
 +
 +    private static String env(final String name, final String fallback) {
@@ -507,10 +561,10 @@ index 8f1b018d..b7fa06a5 100644
                  System.out.println("Unknown mode.\nKnown modes are 'sim', 'parse', 'server'");
 diff --git a/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
 new file mode 100644
-index 00000000..96f9b19b
+index 00000000..b7f790f6
 --- /dev/null
 +++ b/forge-gui-desktop/src/test/java/forge/net/DedicatedServerSmoke.java
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,77 @@
 +package forge.net;
 +
 +import forge.deck.Deck;
@@ -518,15 +572,18 @@ index 00000000..96f9b19b
 +import forge.interfaces.IGameController;
 +
 +import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
 +
 +/**
-+ * Manual smoke test for {@code forge server}: two scripted players join a running dedicated
-+ * server, ready up with legal 60-card decks, and the first one concedes once the game starts.
++ * Manual smoke test for {@code forge server}: scripted players join a running dedicated server,
++ * ready up with legal 60-card decks, and the first one concedes once the game starts.
 + *
 + * <pre>
-+ *   java -cp ... forge.net.DedicatedServerSmoke host port nameA nameB
++ *   java -cp ... forge.net.DedicatedServerSmoke host port nameA nameB   (PvP server)
++ *   java -cp ... forge.net.DedicatedServerSmoke host port nameA         (vs-AI server)
 + * </pre>
-+ * Exit code 0 means both players were seated and the game started; verify the reported
++ * Exit code 0 means the players were seated and the game started; verify the reported
 + * result on the rewards service.
 + */
 +public final class DedicatedServerSmoke {
@@ -535,41 +592,45 @@ index 00000000..96f9b19b
 +        final int port = Integer.parseInt(args[1]);
 +        TestUtils.ensureFModelInitialized();
 +
-+        try (HeadlessNetworkClient a = new HeadlessNetworkClient(args[2], host, port);
-+             HeadlessNetworkClient b = new HeadlessNetworkClient(args[3], host, port)) {
-+            for (final HeadlessNetworkClient c : new HeadlessNetworkClient[] {a, b}) {
-+                if (!c.connect(15_000)) {
-+                    System.err.println("SMOKE: connect failed");
-+                    System.exit(1);
-+                }
-+                Thread.sleep(500);
-+                final Deck deck = TestDeckLoader.createMinimalDeck("Forest", 60);
-+                c.getClient().send(UpdateLobbyPlayerEvent.deckUpdate(deck));
-+                Thread.sleep(500);
-+                c.setReady();
++        final List<HeadlessNetworkClient> clients = new ArrayList<>();
++        for (int i = 2; i < args.length; i++) {
++            clients.add(new HeadlessNetworkClient(args[i], host, port));
++        }
++        for (final HeadlessNetworkClient c : clients) {
++            if (!c.connect(15_000)) {
++                System.err.println("SMOKE: connect failed");
++                System.exit(1);
 +            }
-+            if (!a.waitForGameStart(60_000) || !b.waitForGameStart(60_000)) {
++            Thread.sleep(500);
++            final Deck deck = TestDeckLoader.createMinimalDeck("Forest", 60);
++            c.getClient().send(UpdateLobbyPlayerEvent.deckUpdate(deck));
++            Thread.sleep(500);
++            c.setReady();
++        }
++        for (final HeadlessNetworkClient c : clients) {
++            if (!c.waitForGameStart(60_000)) {
 +                System.err.println("SMOKE: game did not start");
 +                System.exit(1);
 +            }
-+            System.out.println("SMOKE: game started, " + args[2] + " concedes");
-+            Thread.sleep(3_000);
-+            // concede() can block until the server answers, so don't let it hold up the check
-+            final Thread conceder = new Thread(() -> {
-+                try {
-+                    concede(a);
-+                } catch (final Exception e) {
-+                    e.printStackTrace();
-+                }
-+            }, "smoke-concede");
-+            conceder.setDaemon(true);
-+            conceder.start();
-+            // The scripted clients never press Quit on the result screen, so instead of waiting for
-+            // the match to close, check the result on the rewards service (GET /api/leaderboard).
-+            Thread.sleep(10_000);
-+            System.out.println("SMOKE: conceded; the server should now report " + args[3] + " as the winner");
-+            System.exit(0);
 +        }
++        System.out.println("SMOKE: game started, " + args[2] + " concedes");
++        Thread.sleep(3_000);
++        // concede() can block until the server answers, so don't let it hold up the check
++        final Thread conceder = new Thread(() -> {
++            try {
++                concede(clients.get(0));
++            } catch (final Exception e) {
++                e.printStackTrace();
++            }
++        }, "smoke-concede");
++        conceder.setDaemon(true);
++        conceder.start();
++        // The scripted clients never press Quit on the result screen, so instead of waiting for
++        // the match to close, check the result on the rewards service (GET /api/leaderboard).
++        Thread.sleep(10_000);
++        System.out.println("SMOKE: conceded; the server should now report "
++                + (args.length > 3 ? args[3] : "the AI") + " as the winner");
++        System.exit(0);
 +    }
 +
 +    private static void concede(final HeadlessNetworkClient client) throws Exception {

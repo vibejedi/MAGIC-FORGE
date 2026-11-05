@@ -27,12 +27,15 @@ function makeConfig(over: Partial<Config> = {}): Config {
         { id: "first-win", title: "First win", metric: "wins", target: 1, reward: "10" },
         { id: "wins-3", title: "3 wins", metric: "wins", target: 3, reward: "30" },
         { id: "games-2", title: "2 games", metric: "games", target: 2, reward: "5.5" },
+        { id: "ai-first-win", title: "First AI win", ladder: "ai", metric: "wins", target: 1, reward: "1" },
       ],
     }),
     gameServerSecret: SECRET,
     adminToken: ADMIN,
     minTurnsForRanked: 4,
     maxRankedPerPairPerDay: 2,
+    maxAiRankedPerDay: 3,
+    aiRating: 1400,
     armTtlMinutes: 15,
     minAccountAgeHoursToClaim: 0,
     claimMode: "manual",
@@ -327,5 +330,62 @@ describe("claim rules", () => {
       base = oldBase;
       srv.close();
     }
+  });
+});
+
+describe("ranked vs AI", () => {
+  let p: Player;
+  before(async () => {
+    p = await signUp("solo");
+  });
+  const aiReport = (winner: string | null, extra: Record<string, unknown> = {}) =>
+    gs("/api/gs/match-result", {
+      matchId: `ai-${++matchSeq}-xxxxxxxx`,
+      serverId: "vs-ai-1",
+      mode: "ai",
+      players: [{ username: "solo", leaver: false }],
+      winner,
+      turns: 9,
+      durationSec: 300,
+      ...extra,
+    });
+
+  test("a win against the AI counts on the AI ladder only and unlocks AI goals", async () => {
+    const r = await aiReport("solo");
+    assert.equal(r.body.ranked, true);
+    const me = (await call("GET", "/api/me", undefined, as(p))).body;
+    assert.equal(me.aiStats.wins, 1);
+    assert.equal(me.aiStats.rating, 1200 + eloDelta(1200, 1400, 1));
+    assert.equal(me.stats, null, "PvP stats untouched");
+    assert.deepEqual(me.rewards.map((x: any) => x.goalId), ["ai-first-win"]);
+    assert.equal(me.aiRankedLeftToday, 2);
+  });
+
+  test("losing to the AI, or leaving, is a ranked loss", async () => {
+    assert.equal((await aiReport("Forge AI")).body.ranked, true);
+    assert.equal((await aiReport("solo", { turns: 1, players: [{ username: "solo", leaver: true }] })).body.ranked, true);
+    const me = (await call("GET", "/api/me", undefined, as(p))).body;
+    assert.equal(me.aiStats.wins, 1);
+    assert.equal(me.aiStats.losses, 2);
+  });
+
+  test("only MAX_AI_RANKED_PER_DAY AI games count per day", async () => {
+    const r = await aiReport("solo");
+    assert.equal(r.body.ranked, false);
+    assert.match(r.body.note, /daily limit/);
+  });
+
+  test("AI leaderboard is separate from the PvP one", async () => {
+    const ai = (await call("GET", "/api/leaderboard?ladder=ai")).body;
+    assert.deepEqual(ai.rows.map((r: any) => r.username), ["solo"]);
+    const pvp = (await call("GET", "/api/leaderboard")).body;
+    assert.ok(!pvp.rows.some((r: any) => r.username === "solo"));
+  });
+
+  test("servers report their mode", async () => {
+    await gs("/api/gs/heartbeat", { serverId: "vs-ai-1", address: "x:36745", mode: "ai", status: "waiting", players: [] });
+    await gs("/api/gs/heartbeat", { serverId: "ranked-1", address: "x:36743", status: "waiting", players: [] });
+    const servers = (await call("GET", "/api/servers")).body;
+    assert.deepEqual(servers.map((s: any) => [s.id, s.mode]), [["ranked-1", "pvp"], ["vs-ai-1", "ai"]]);
   });
 });

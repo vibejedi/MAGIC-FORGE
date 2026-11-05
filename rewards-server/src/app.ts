@@ -5,7 +5,7 @@ import { accountForSession, isWalletAddress, issueNonce, safeEqual, verifyServer
 import { type Config, fromBaseUnits } from "./config.js";
 import { type DB, now } from "./db.js";
 import { approveClaim, ClaimError, claimReward, rejectClaim, resolveReview } from "./payouts.js";
-import { leaderboard, type MatchReport, recordMatch } from "./ranking.js";
+import { ladderSeason, leaderboard, type MatchReport, recordAiMatch, recordMatch } from "./ranking.js";
 
 const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
 const SERVER_STALE_SEC = 60;
@@ -66,15 +66,16 @@ export function createApp(db: DB, cfg: Config) {
   });
 
   app.get("/api/leaderboard", (req, res) => {
-    const season = typeof req.query.season === "string" ? req.query.season : cfg.goals.season;
-    res.json({ season, rows: leaderboard(db, season) });
+    const ladder = req.query.ladder === "ai" ? "ai" : "pvp";
+    const season = ladderSeason(cfg, ladder);
+    res.json({ season: cfg.goals.season, ladder, rows: leaderboard(db, season) });
   });
 
   app.get("/api/servers", (_req, res) => {
-    const rows = db.prepare(`SELECT id, address, status, players, seen_at FROM servers WHERE seen_at > ? ORDER BY id`).all(now() - SERVER_STALE_SEC) as {
-      id: string; address: string; status: string; players: string; seen_at: number;
+    const rows = db.prepare(`SELECT id, address, mode, status, players, seen_at FROM servers WHERE seen_at > ? ORDER BY mode DESC, id`).all(now() - SERVER_STALE_SEC) as {
+      id: string; address: string; mode: string; status: string; players: string; seen_at: number;
     }[];
-    res.json(rows.map((r) => ({ id: r.id, address: r.address, status: r.status, players: JSON.parse(r.players) })));
+    res.json(rows.map((r) => ({ id: r.id, address: r.address, mode: r.mode, status: r.status, players: JSON.parse(r.players) })));
   });
 
   // ---------- player auth ----------
@@ -106,12 +107,18 @@ export function createApp(db: DB, cfg: Config) {
     const acct = db.prepare(`SELECT id, wallet, username, created_at FROM accounts WHERE id = ?`).get(req.accountId!) as {
       id: number; wallet: string; username: string | null; created_at: number;
     };
-    const stats = db.prepare(`SELECT rating, wins, losses, draws, games, streak, best_streak AS bestStreak FROM stats WHERE account_id = ? AND season = ?`)
-      .get(acct.id, cfg.goals.season) ?? null;
+    const statsQuery = db.prepare(`SELECT rating, wins, losses, draws, games, streak, best_streak AS bestStreak FROM stats WHERE account_id = ? AND season = ?`);
+    const stats = statsQuery.get(acct.id, ladderSeason(cfg, "pvp")) ?? null;
+    const aiStats = statsQuery.get(acct.id, ladderSeason(cfg, "ai")) ?? null;
+    const aiRankedToday = (db.prepare(`SELECT COUNT(*) AS n FROM ai_matches WHERE account_id = ? AND ranked = 1 AND created_at > ?`)
+      .get(acct.id, now() - 86400) as { n: number }).n;
     const rewards = (db.prepare(`SELECT id, season, goal_id AS goalId, amount, status, signature, error, earned_at AS earnedAt FROM rewards WHERE account_id = ? ORDER BY earned_at DESC`)
       .all(acct.id) as { amount: string }[]).map((r) => ({ ...r, amount: fmt(r.amount) }));
     const arm = db.prepare(`SELECT ip, expires_at AS expiresAt FROM arms WHERE account_id = ? AND expires_at > ?`).get(acct.id, now()) ?? null;
-    res.json({ wallet: acct.wallet, username: acct.username, createdAt: acct.created_at, stats, rewards, arm });
+    res.json({
+      wallet: acct.wallet, username: acct.username, createdAt: acct.created_at, stats, aiStats,
+      aiRankedLeftToday: Math.max(0, cfg.maxAiRankedPerDay - aiRankedToday), rewards, arm,
+    });
   });
 
   app.post("/api/me/username", requirePlayer, (req: AuthedRequest, res) => {
@@ -175,18 +182,33 @@ export function createApp(db: DB, cfg: Config) {
 
   app.post("/api/gs/heartbeat", requireGameServer, (req, res) => {
     const { serverId, address, status, players } = req.body ?? {};
+    const mode = req.body?.mode === "ai" ? "ai" : "pvp";
     if (typeof serverId !== "string" || typeof address !== "string" || typeof status !== "string" || !Array.isArray(players)) {
       return res.status(400).json({ error: "bad request" });
     }
     db.prepare(
-      `INSERT INTO servers (id, address, status, players, seen_at) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET address = excluded.address, status = excluded.status, players = excluded.players, seen_at = excluded.seen_at`,
-    ).run(serverId, address, status, JSON.stringify(players.map(String).slice(0, 8)), now());
+      `INSERT INTO servers (id, address, mode, status, players, seen_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET address = excluded.address, mode = excluded.mode, status = excluded.status,
+         players = excluded.players, seen_at = excluded.seen_at`,
+    ).run(serverId, address, mode, status, JSON.stringify(players.map(String).slice(0, 8)), now());
     res.json({ ok: true });
   });
 
   app.post("/api/gs/match-result", requireGameServer, (req, res) => {
     const b = req.body ?? {};
+    if (b.mode === "ai") {
+      const p = Array.isArray(b.players) && b.players.length === 1 ? b.players[0] : null;
+      const ok =
+        typeof b.matchId === "string" && b.matchId.length >= 8 && b.matchId.length <= 64 &&
+        typeof b.serverId === "string" && p && typeof p.username === "string" &&
+        (b.winner === null || typeof b.winner === "string") &&
+        Number.isInteger(b.turns) && Number.isInteger(b.durationSec);
+      if (!ok) return res.status(400).json({ error: "bad AI match report" });
+      return res.json(recordAiMatch(db, cfg, {
+        matchId: b.matchId, serverId: b.serverId, username: p.username, leaver: p.leaver === true,
+        winner: b.winner, turns: b.turns, durationSec: b.durationSec,
+      }));
+    }
     const valid =
       typeof b.matchId === "string" && b.matchId.length >= 8 && b.matchId.length <= 64 &&
       typeof b.serverId === "string" &&
@@ -230,6 +252,15 @@ export function createApp(db: DB, cfg: Config) {
   app.post("/api/admin/claims/:id/approve", requireAdmin, adminAction((id) => approveClaim(db, id)));
   app.post("/api/admin/claims/:id/reject", requireAdmin, adminAction((id, b) => rejectClaim(db, id, String(b.reason ?? "rejected"))));
   app.post("/api/admin/claims/:id/resolve", requireAdmin, adminAction((id, b) => resolveReview(db, id, b.landed === true)));
+
+  app.get("/api/admin/ai-matches", requireAdmin, (_req, res) => {
+    res.json(
+      db.prepare(
+        `SELECT m.*, a.username FROM ai_matches m JOIN accounts a ON a.id = m.account_id
+         ORDER BY m.created_at DESC LIMIT 200`,
+      ).all(),
+    );
+  });
 
   app.get("/api/admin/matches", requireAdmin, (_req, res) => {
     res.json(

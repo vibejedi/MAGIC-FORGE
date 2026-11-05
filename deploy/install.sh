@@ -25,7 +25,7 @@ fi
 
 cd "$(dirname "$0")"
 REWARDS_PORT=8080
-FORGE_PORTS="36743 36744"
+FORGE_PORTS="36743 36744 36745"
 
 # --- ports we need must be free (or already ours) ---
 for port in $REWARDS_PORT $FORGE_PORTS; do
@@ -128,7 +128,7 @@ docker compose up -d --build
 echo
 echo "Done."
 echo "  Website:        https://$DOMAIN"
-echo "  Forge servers:  $DOMAIN:36743 and $DOMAIN:36744 (they need ~1 minute to load cards)"
+echo "  Forge servers:  $DOMAIN:36743 and $DOMAIN:36744 (PvP), $DOMAIN:36745 (vs AI); ~1 minute to load cards"
 echo "  Admin token:    grep ADMIN_TOKEN $(pwd)/.env"
 echo "  Logs:           cd $(pwd) && docker compose logs -f"
 echo "Payouts are in test mode (PAYOUT_MODE=dry-run) until you change deploy/.env."
