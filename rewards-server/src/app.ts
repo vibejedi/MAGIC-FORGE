@@ -86,8 +86,16 @@ export function createApp(db: DB, cfg: Config) {
 
   app.post("/api/auth/verify", (req, res) => {
     const { wallet, signature, message } = req.body ?? {};
-    if (!isWalletAddress(wallet) || typeof signature !== "string" || typeof message !== "string" || message.length > 2000) {
-      return res.status(400).json({ error: "bad request" });
+    const problem = !isWalletAddress(wallet)
+      ? "wallet address is missing or invalid"
+      : typeof signature !== "string" || signature.length < 64 || signature.length > 100
+        ? "signature is missing or not base58"
+        : typeof message !== "string" || message.length > 2000
+          ? "signed message is missing or too long"
+          : null;
+    if (problem) {
+      console.warn(`[auth] rejected sign-in: ${problem} (wallet=${String(wallet).slice(0, 60)})`);
+      return res.status(400).json({ error: `Sign-in failed: ${problem}.` });
     }
     const out = verifySignIn(db, cfg.publicOrigin, wallet, message, signature);
     if (!out) return res.status(401).json({ error: "signature check failed, please try signing in again" });

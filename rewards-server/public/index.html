@@ -123,6 +123,16 @@ function b58(bytes) {
   for (const b of bytes) { if (b === 0) out = "1" + out; else break; }
   return out;
 }
+/** Wallets return bytes as Uint8Array, ArrayBuffer, plain arrays, Buffer JSON or index-keyed objects. */
+function toBytes(x) {
+  if (x instanceof Uint8Array) return x;
+  if (x instanceof ArrayBuffer) return new Uint8Array(x);
+  if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+  if (Array.isArray(x)) return Uint8Array.from(x);
+  if (x && Array.isArray(x.data)) return Uint8Array.from(x.data);
+  if (x && typeof x === "object") return Uint8Array.from(Object.keys(x).sort((a, b) => a - b).map((k) => x[k]));
+  throw new Error("Wallet returned data in an unexpected format.");
+}
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 let token = null;
@@ -165,9 +175,9 @@ $("connectBtn").onclick = async () => {
       // Sign In With Solana: the wallet connects, shows a sign-in screen and signs in one step.
       const { input } = await api("/api/auth/nonce", { method: "POST", body: {} });
       const out = await p.signIn(input);
-      const addr = out.account?.address ?? out.address;
-      wallet = typeof addr === "string" ? addr : addr.toString();
-      message = new TextDecoder().decode(out.signedMessage);
+      message = new TextDecoder().decode(toBytes(out.signedMessage));
+      // SIWS puts the signing address on line 2; that's the one the signature must match.
+      wallet = message.split("\n")[1];
       sig = out.signature;
     } else {
       const { publicKey } = await p.connect();
@@ -176,7 +186,8 @@ $("connectBtn").onclick = async () => {
       const signed = await p.signMessage(new TextEncoder().encode(message), "utf8");
       sig = signed.signature || signed;
     }
-    const { token: t } = await api("/api/auth/verify", { method: "POST", body: { wallet, message, signature: b58(sig) } });
+    const signature = typeof sig === "string" ? sig : b58(toBytes(sig));
+    const { token: t } = await api("/api/auth/verify", { method: "POST", body: { wallet, message, signature } });
     setToken(t);
   } catch (e) {
     alert((e && e.message) || String(e));
