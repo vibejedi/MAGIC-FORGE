@@ -17,4 +17,4 @@ ufw allow 36743:36746/tcp
 ufw --force enable
 
 # Docker publishes ports around ufw; with host networking (used here) ufw rules apply as normal.
-echo "Done. Next: cd deploy && cp .env.example .env && cp goals.example.json goals.json, edit both, then: docker compose up -d --build"
+echo "Base setup done."

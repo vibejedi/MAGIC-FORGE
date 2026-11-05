@@ -52,25 +52,21 @@ Needs Ubuntu 22.04/24.04 and roughly 2 GB RAM per Forge server plus 1 GB. The Co
 2. On the VPS, as root:
 
    ```bash
+   apt-get update && apt-get install -y git
+   ```
+   ```bash
    git clone <this repo> ranked-forge && cd ranked-forge
    ```
    ```bash
-   ./deploy/setup-vps.sh
+   ./deploy/install.sh play.yourdomain.com
    ```
-   This installs Docker and opens ports 22, 80, 443 and 36743-36746 in the firewall.
-3. Configure:
+   This installs Docker, opens ports 22, 80, 443 and 36743-36746 in the firewall, writes `deploy/.env` with fresh secrets, and builds and starts everything. The first build takes several minutes. Each Forge server needs about a minute to load its card data before it accepts players. Re-running it keeps your existing `.env`.
+3. Edit `deploy/goals.json` for your goals and amounts and `deploy/.env` for limits, then apply the changes:
 
    ```bash
-   cd deploy && cp .env.example .env && cp goals.example.json goals.json
+   cd deploy && docker compose up -d
    ```
-   Fill in `DOMAIN`, `PUBLIC_HOST`, `PUBLIC_ORIGIN`, and generate both secrets with `openssl rand -hex 32`. Edit `goals.json` for your goals and amounts.
-4. Start:
-
-   ```bash
-   docker compose up -d --build
-   ```
-   The first build downloads Forge and its dependencies and takes several minutes. Each Forge server needs about a minute to load its card data before it accepts players.
-5. Watch the logs:
+4. Watch the logs:
 
    ```bash
    docker compose logs -f forge-1 rewards
