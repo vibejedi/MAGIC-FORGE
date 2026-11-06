@@ -1,20 +1,20 @@
 # Everything runs with host networking so the Forge servers see players' real IP addresses
 # (the login check compares them with the IP that pressed "Play ranked" on the website).
+#
+# Each image is built by exactly one service (forge-1, stream-1); the others reuse it.
+# Several services building the same image tag at once makes Compose fail with
+# "image ... already exists".
 x-forge: &forge
-  build:
-    context: ../forge-server
-    target: server
   image: ranked-forge-server
+  pull_policy: never
   network_mode: host
   restart: always          # each server exits after a match and comes back with a fresh lobby
   env_file: .env
   depends_on: [rewards]
 
 x-stream: &stream
-  build:
-    context: ../forge-server
-    target: stream
   image: ranked-forge-stream
+  pull_policy: never
   restart: unless-stopped
   # No .env here: seats only get their slot number and the stream secret, never the
   # game-server secret or payout keys.
@@ -54,6 +54,9 @@ services:
 
   forge-1:
     <<: *forge
+    build:
+      context: ../forge-server
+      target: server
     environment:
       FORGE_SERVER_ID: ranked-1
       FORGE_PORT: "36743"
@@ -66,6 +69,7 @@ services:
   forge-2:
     <<: *forge
     profiles: ["pvp2"]
+    depends_on: [rewards, forge-1]
     environment:
       FORGE_SERVER_ID: ranked-2
       FORGE_PORT: "36744"
@@ -77,6 +81,7 @@ services:
   # block with the next port; each server holds one match at a time and uses ~1.5 GB RAM.
   forge-ai-1:
     <<: *forge
+    depends_on: [rewards, forge-1]
     environment:
       FORGE_SERVER_ID: vs-ai-1
       FORGE_MODE: ai
@@ -92,6 +97,9 @@ services:
   # to the number of seats defined here.
   stream-1:
     <<: *stream
+    build:
+      context: ../forge-server
+      target: stream
     networks: { stream: { ipv4_address: 172.30.0.11 } }
     ports: ["127.0.0.1:6081:6080"]
     environment: { SLOT: "1", REWARDS_URL: "https://${DOMAIN}", STREAM_SECRET: "${STREAM_SECRET}" }
@@ -99,6 +107,7 @@ services:
 
   stream-2:
     <<: *stream
+    depends_on: [stream-1]
     networks: { stream: { ipv4_address: 172.30.0.12 } }
     ports: ["127.0.0.1:6082:6080"]
     environment: { SLOT: "2", REWARDS_URL: "https://${DOMAIN}", STREAM_SECRET: "${STREAM_SECRET}" }
